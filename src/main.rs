@@ -1,9 +1,14 @@
+mod backend;
+mod models;
+
+use backend::mock::MockBackend;
 use gtk4::gdk::Display;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Image, Label,
     ListBox, ListBoxRow, Orientation, SearchEntry, Switch,
 };
+use models::{AppState, Network, NetworkAction};
 
 fn main() {
     let app = Application::builder()
@@ -35,9 +40,12 @@ fn build_ui(app: &Application) {
     let panel = GtkBox::new(Orientation::Vertical, 12);
     panel.add_css_class("yufi-panel");
 
-    let header = build_header();
+    let backend = MockBackend::new();
+    let state = backend.state();
+
+    let header = build_header(&state);
     let search = build_search();
-    let list = build_network_list();
+    let list = build_network_list(&state);
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     let hidden = build_hidden_button();
@@ -54,7 +62,7 @@ fn build_ui(app: &Application) {
     window.present();
 }
 
-fn build_header() -> GtkBox {
+fn build_header(state: &AppState) -> GtkBox {
     let header = GtkBox::new(Orientation::Horizontal, 10);
     header.add_css_class("yufi-header");
     header.set_hexpand(true);
@@ -69,7 +77,7 @@ fn build_header() -> GtkBox {
         .build();
     refresh.add_css_class("yufi-icon-button");
 
-    let toggle = Switch::builder().active(true).build();
+    let toggle = Switch::builder().active(state.wifi_enabled).build();
 
     header.append(&title);
     header.append(&refresh);
@@ -84,28 +92,20 @@ fn build_search() -> SearchEntry {
     search
 }
 
-fn build_network_list() -> ListBox {
+fn build_network_list(state: &AppState) -> ListBox {
     let list = ListBox::new();
     list.add_css_class("yufi-list");
     list.set_selection_mode(gtk4::SelectionMode::None);
     list.set_show_separators(false);
 
-    let rows = [
-        ("Home_Fiber_5G", "network-wireless-signal-excellent", Some("Disconnect")),
-        ("Office_Main", "network-wireless-signal-good", None),
-        ("Coffee_Shop_Free", "network-wireless-signal-good", None),
-        ("Guest_Network", "network-wireless-signal-good", Some("Connect")),
-        ("Linksys_502", "network-wireless-signal-none", None),
-    ];
-
-    for (name, icon, action) in rows {
-        list.append(&build_network_row(name, icon, action));
+    for network in &state.networks {
+        list.append(&build_network_row(network));
     }
 
     list
 }
 
-fn build_network_row(name: &str, icon_name: &str, action: Option<&str>) -> ListBoxRow {
+fn build_network_row(network: &Network) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("yufi-row");
     row.set_activatable(false);
@@ -119,12 +119,12 @@ fn build_network_row(name: &str, icon_name: &str, action: Option<&str>) -> ListB
     let top = GtkBox::new(Orientation::Horizontal, 8);
     top.set_hexpand(true);
 
-    let label = Label::new(Some(name));
+    let label = Label::new(Some(&network.ssid));
     label.add_css_class("yufi-network-name");
     label.set_halign(Align::Start);
     label.set_hexpand(true);
 
-    let icon = Image::from_icon_name(icon_name);
+    let icon = Image::from_icon_name(network.signal_icon);
     icon.add_css_class("yufi-network-icon");
 
     top.append(&label);
@@ -132,10 +132,18 @@ fn build_network_row(name: &str, icon_name: &str, action: Option<&str>) -> ListB
 
     container.append(&top);
 
-    if let Some(label) = action {
-        let button = Button::with_label(label);
-        button.add_css_class("yufi-primary");
-        container.append(&button);
+    match network.action {
+        NetworkAction::Connect => {
+            let button = Button::with_label("Connect");
+            button.add_css_class("yufi-primary");
+            container.append(&button);
+        }
+        NetworkAction::Disconnect => {
+            let button = Button::with_label("Disconnect");
+            button.add_css_class("yufi-primary");
+            container.append(&button);
+        }
+        NetworkAction::None => {}
     }
 
     row.set_child(Some(&container));
