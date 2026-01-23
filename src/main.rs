@@ -5,12 +5,15 @@ use backend::{Backend, BackendError};
 use backend::mock::MockBackend;
 use backend::nm::NetworkManagerBackend;
 use gtk4::gdk::Display;
+use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Image, Label,
     ListBox, ListBoxRow, Orientation, SearchEntry, Switch,
 };
 use models::{AppState, Network, NetworkAction};
+use std::cell::Cell;
+use std::rc::Rc;
 
 fn main() {
     let app = Application::builder()
@@ -42,25 +45,21 @@ fn build_ui(app: &Application) {
     let panel = GtkBox::new(Orientation::Vertical, 12);
     panel.add_css_class("yufi-panel");
 
-    let nm_backend = NetworkManagerBackend::new();
-    let state = match nm_backend.load_state() {
-        Ok(state) => state,
-        Err(err) => {
-            eprintln!("NetworkManager backend unavailable: {err:?}. Falling back to mock data.");
-            MockBackend::new()
-                .load_state()
-                .unwrap_or_else(|_| fallback_state(err))
-        }
-    };
+    let nm_backend = Rc::new(NetworkManagerBackend::new());
+    let mock_backend = Rc::new(MockBackend::new());
+    let toggle_guard = Rc::new(Cell::new(false));
+
+    let state = load_state_with_backend(&nm_backend, &mock_backend);
 
     let header = build_header(&state);
     let search = build_search();
-    let list = build_network_list(&state);
+    let list = build_network_list();
+    populate_network_list(&list, &state);
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     let hidden = build_hidden_button();
 
-    panel.append(&header);
+    panel.append(&header.container);
     panel.append(&search);
     panel.append(&list);
     panel.append(&spacer);
@@ -68,11 +67,19 @@ fn build_ui(app: &Application) {
 
     root.append(&panel);
 
+    wire_actions(&header, &list, &nm_backend, &mock_backend, &toggle_guard);
+
     window.set_child(Some(&root));
     window.present();
 }
 
-fn build_header(state: &AppState) -> GtkBox {
+struct HeaderWidgets {
+    container: GtkBox,
+    toggle: Switch,
+    refresh: Button,
+}
+
+fn build_header(state: &AppState) -> HeaderWidgets {
     let header = GtkBox::new(Orientation::Horizontal, 10);
     header.add_css_class("yufi-header");
     header.set_hexpand(true);
@@ -82,9 +89,7 @@ fn build_header(state: &AppState) -> GtkBox {
     title.set_halign(Align::Start);
     title.set_hexpand(true);
 
-    let refresh = Button::builder()
-        .icon_name("view-refresh")
-        .build();
+    let refresh = Button::builder().icon_name("view-refresh").build();
     refresh.add_css_class("yufi-icon-button");
 
     let toggle = Switch::builder().active(state.wifi_enabled).build();
@@ -92,7 +97,12 @@ fn build_header(state: &AppState) -> GtkBox {
     header.append(&title);
     header.append(&refresh);
     header.append(&toggle);
-    header
+
+    HeaderWidgets {
+        container: header,
+        toggle,
+        refresh,
+    }
 }
 
 fn build_search() -> SearchEntry {
@@ -102,15 +112,11 @@ fn build_search() -> SearchEntry {
     search
 }
 
-fn build_network_list(state: &AppState) -> ListBox {
+fn build_network_list() -> ListBox {
     let list = ListBox::new();
     list.add_css_class("yufi-list");
     list.set_selection_mode(gtk4::SelectionMode::None);
     list.set_show_separators(false);
-
-    for network in &state.networks {
-        list.append(&build_network_row(network));
-    }
 
     list
 }
@@ -164,6 +170,95 @@ fn build_hidden_button() -> Button {
     let hidden = Button::with_label("Connect to Hidden Network...");
     hidden.add_css_class("yufi-footer");
     hidden
+}
+
+fn populate_network_list(list: &ListBox, state: &AppState) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+
+    for network in &state.networks {
+        list.append(&build_network_row(network));
+    }
+}
+
+fn wire_actions(
+    header: &HeaderWidgets,
+    list: &ListBox,
+    nm_backend: &Rc<NetworkManagerBackend>,
+    mock_backend: &Rc<MockBackend>,
+    toggle_guard: &Rc<Cell<bool>>,
+) {
+    let list_refresh = list.clone();
+    let toggle_refresh = header.toggle.clone();
+    let nm_refresh = nm_backend.clone();
+    let mock_refresh = mock_backend.clone();
+    let guard_refresh = toggle_guard.clone();
+    header.refresh.connect_clicked(move |_| {
+        if let Err(err) = nm_refresh.request_scan() {
+            eprintln!("Scan request failed: {err:?}");
+        }
+        refresh_ui(
+            &list_refresh,
+            &toggle_refresh,
+            &nm_refresh,
+            &mock_refresh,
+            &guard_refresh,
+        );
+    });
+
+    let list_toggle = list.clone();
+    let toggle_toggle = header.toggle.clone();
+    let nm_toggle = nm_backend.clone();
+    let mock_toggle = mock_backend.clone();
+    let guard_toggle = toggle_guard.clone();
+    header.toggle.connect_state_set(move |_switch, state| {
+        if guard_toggle.get() {
+            return Propagation::Proceed;
+        }
+
+        if let Err(err) = nm_toggle.set_wifi_enabled(state) {
+            eprintln!("Failed to set Wi‑Fi: {err:?}");
+        }
+
+        refresh_ui(
+            &list_toggle,
+            &toggle_toggle,
+            &nm_toggle,
+            &mock_toggle,
+            &guard_toggle,
+        );
+        Propagation::Proceed
+    });
+}
+
+fn refresh_ui(
+    list: &ListBox,
+    toggle: &Switch,
+    nm_backend: &NetworkManagerBackend,
+    mock_backend: &MockBackend,
+    toggle_guard: &Cell<bool>,
+) {
+    let state = load_state_with_backend(nm_backend, mock_backend);
+    toggle_guard.set(true);
+    toggle.set_active(state.wifi_enabled);
+    toggle_guard.set(false);
+    populate_network_list(list, &state);
+}
+
+fn load_state_with_backend(
+    nm_backend: &NetworkManagerBackend,
+    mock_backend: &MockBackend,
+) -> AppState {
+    match nm_backend.load_state() {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("NetworkManager backend unavailable: {err:?}. Falling back to mock data.");
+            mock_backend
+                .load_state()
+                .unwrap_or_else(|_| fallback_state(err))
+        }
+    }
 }
 
 fn fallback_state(_error: BackendError) -> AppState {
