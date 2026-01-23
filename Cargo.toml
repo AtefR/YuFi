@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 gtk4 = { version = "0.9", package = "gtk4" }
+zbus = { version = "4.2", features = ["blocking"] }

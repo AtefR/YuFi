@@ -3,6 +3,7 @@ mod models;
 
 use backend::{Backend, BackendError};
 use backend::mock::MockBackend;
+use backend::nm::NetworkManagerBackend;
 use gtk4::gdk::Display;
 use gtk4::prelude::*;
 use gtk4::{
@@ -41,8 +42,16 @@ fn build_ui(app: &Application) {
     let panel = GtkBox::new(Orientation::Vertical, 12);
     panel.add_css_class("yufi-panel");
 
-    let backend = MockBackend::new();
-    let state = backend.load_state().unwrap_or_else(|err| fallback_state(err));
+    let nm_backend = NetworkManagerBackend::new();
+    let state = match nm_backend.load_state() {
+        Ok(state) => state,
+        Err(err) => {
+            eprintln!("NetworkManager backend unavailable: {err:?}. Falling back to mock data.");
+            MockBackend::new()
+                .load_state()
+                .unwrap_or_else(|_| fallback_state(err))
+        }
+    };
 
     let header = build_header(&state);
     let search = build_search();

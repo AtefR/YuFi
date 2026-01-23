@@ -10,6 +10,8 @@ pub struct Network {
     pub ssid: String,
     pub signal_icon: &'static str,
     pub action: NetworkAction,
+    pub strength: u8,
+    pub is_active: bool,
 }
 
 #[derive(Clone, Debug)]
