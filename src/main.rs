@@ -1,7 +1,9 @@
 use gtk4::gdk::Display;
 use gtk4::prelude::*;
-use gtk4::{Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Image,
-    Label, ListBox, ListBoxRow, Orientation, SearchEntry, Switch};
+use gtk4::{
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Image, Label,
+    ListBox, ListBoxRow, Orientation, SearchEntry, Switch,
+};
 
 fn main() {
     let app = Application::builder()
@@ -24,21 +26,29 @@ fn build_ui(app: &Application) {
 
     window.add_css_class("yufi-window");
 
-    let root = GtkBox::new(Orientation::Vertical, 12);
-    root.set_margin_top(14);
-    root.set_margin_bottom(14);
-    root.set_margin_start(14);
-    root.set_margin_end(14);
+    let root = GtkBox::new(Orientation::Vertical, 0);
+    root.set_margin_top(12);
+    root.set_margin_bottom(12);
+    root.set_margin_start(12);
+    root.set_margin_end(12);
+
+    let panel = GtkBox::new(Orientation::Vertical, 12);
+    panel.add_css_class("yufi-panel");
 
     let header = build_header();
     let search = build_search();
     let list = build_network_list();
-    let footer = build_footer();
+    let spacer = GtkBox::new(Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+    let hidden = build_hidden_button();
 
-    root.append(&header);
-    root.append(&search);
-    root.append(&list);
-    root.append(&footer);
+    panel.append(&header);
+    panel.append(&search);
+    panel.append(&list);
+    panel.append(&spacer);
+    panel.append(&hidden);
+
+    root.append(&panel);
 
     window.set_child(Some(&root));
     window.present();
@@ -46,8 +56,7 @@ fn build_ui(app: &Application) {
 
 fn build_header() -> GtkBox {
     let header = GtkBox::new(Orientation::Horizontal, 10);
-    header.add_css_class("yufi-card");
-    header.set_margin_bottom(2);
+    header.add_css_class("yufi-header");
     header.set_hexpand(true);
 
     let title = Label::new(Some("WiFi"));
@@ -79,25 +88,27 @@ fn build_network_list() -> ListBox {
     let list = ListBox::new();
     list.add_css_class("yufi-list");
     list.set_selection_mode(gtk4::SelectionMode::None);
+    list.set_show_separators(false);
 
     let rows = [
-        ("Home_Fiber_5G", true),
-        ("Office_Main", false),
-        ("Coffee_Shop_Free", false),
-        ("Guest_Network", false),
-        ("Linksys_502", false),
+        ("Home_Fiber_5G", "network-wireless-signal-excellent", Some("Disconnect")),
+        ("Office_Main", "network-wireless-signal-good", None),
+        ("Coffee_Shop_Free", "network-wireless-signal-good", None),
+        ("Guest_Network", "network-wireless-signal-good", Some("Connect")),
+        ("Linksys_502", "network-wireless-signal-none", None),
     ];
 
-    for (name, connected) in rows {
-        list.append(&build_network_row(name, connected));
+    for (name, icon, action) in rows {
+        list.append(&build_network_row(name, icon, action));
     }
 
     list
 }
 
-fn build_network_row(name: &str, connected: bool) -> ListBoxRow {
+fn build_network_row(name: &str, icon_name: &str, action: Option<&str>) -> ListBoxRow {
     let row = ListBoxRow::new();
-    row.add_css_class("yufi-card");
+    row.add_css_class("yufi-row");
+    row.set_activatable(false);
 
     let container = GtkBox::new(Orientation::Vertical, 8);
     container.set_margin_top(10);
@@ -113,57 +124,46 @@ fn build_network_row(name: &str, connected: bool) -> ListBoxRow {
     label.set_halign(Align::Start);
     label.set_hexpand(true);
 
-    let icon = Image::from_icon_name("network-wireless-signal-excellent");
+    let icon = Image::from_icon_name(icon_name);
     icon.add_css_class("yufi-network-icon");
 
     top.append(&label);
     top.append(&icon);
 
-    let action = if connected {
-        let button = Button::with_label("Disconnect");
-        button.add_css_class("yufi-primary");
-        button
-    } else {
-        let button = Button::with_label("Connect");
-        button.add_css_class("yufi-primary");
-        button
-    };
-
     container.append(&top);
-    container.append(&action);
+
+    if let Some(label) = action {
+        let button = Button::with_label(label);
+        button.add_css_class("yufi-primary");
+        container.append(&button);
+    }
 
     row.set_child(Some(&container));
     row
 }
 
-fn build_footer() -> GtkBox {
-    let footer = GtkBox::new(Orientation::Vertical, 0);
-    footer.set_hexpand(true);
-    footer.set_vexpand(true);
-
-    let spacer = GtkBox::new(Orientation::Vertical, 0);
-    spacer.set_vexpand(true);
-
+fn build_hidden_button() -> Button {
     let hidden = Button::with_label("Connect to Hidden Network...");
     hidden.add_css_class("yufi-footer");
-
-    footer.append(&spacer);
-    footer.append(&hidden);
-    footer
+    hidden
 }
 
 fn load_css() {
     let css = r#"
     .yufi-window {
-        background: #2c2c2c;
+        background: #2b2b2b;
         color: #e6e6e6;
         font-family: "Cantarell", "Noto Sans", sans-serif;
     }
 
-    .yufi-card {
-        background: #333333;
-        border-radius: 14px;
-        padding: 10px;
+    .yufi-panel {
+        background: #2f2f2f;
+        border-radius: 18px;
+        padding: 12px;
+    }
+
+    .yufi-header {
+        padding: 6px 4px;
     }
 
     .yufi-title {
@@ -180,6 +180,12 @@ fn load_css() {
 
     .yufi-list {
         background: transparent;
+    }
+
+    .yufi-row {
+        background: #333333;
+        border-radius: 12px;
+        margin-bottom: 8px;
     }
 
     .yufi-network-name {
@@ -207,7 +213,7 @@ fn load_css() {
     "#;
 
     let provider = CssProvider::new();
-    provider.load_from_data(css.as_bytes());
+    provider.load_from_data(css);
 
     if let Some(display) = Display::default() {
         gtk4::style_context_add_provider_for_display(
