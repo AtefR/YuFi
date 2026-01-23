@@ -17,6 +17,7 @@ pub trait Backend {
     fn set_wifi_enabled(&self, enabled: bool) -> BackendResult<()>;
     fn request_scan(&self) -> BackendResult<()>;
     fn connect_network(&self, ssid: &str, password: Option<&str>) -> BackendResult<()>;
+    fn disconnect_network(&self, ssid: &str) -> BackendResult<()>;
     fn connect_hidden(
         &self,
         ssid: &str,

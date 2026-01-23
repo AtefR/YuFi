@@ -2,7 +2,7 @@ use crate::backend::{Backend, BackendError, BackendResult};
 use crate::models::{AppState, Network, NetworkAction};
 use std::collections::HashMap;
 use zbus::blocking::{Connection, Proxy};
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{Array, OwnedObjectPath, OwnedValue, Str};
 
 pub struct NetworkManagerBackend;
 
@@ -112,7 +112,62 @@ impl Backend for NetworkManagerBackend {
     }
 
     fn connect_network(&self, _ssid: &str, _password: Option<&str>) -> BackendResult<()> {
-        Err(BackendError::NotImplemented)
+        let conn = system_bus()?;
+        let nm = nm_proxy(&conn)?;
+        let wifi_device = first_wifi_device(&conn, &nm)?;
+        let wireless = wireless_proxy(&conn, &wifi_device)?;
+
+        let (ap_path, _ap_strength) = find_ap_for_ssid(&conn, &wireless, _ssid)?;
+
+        let settings = nm_settings_proxy(&conn)?;
+        if let Some(connection_path) = find_connection_for_ssid(&conn, &settings, _ssid)? {
+            let _: OwnedObjectPath = nm
+                .call(
+                    "ActivateConnection",
+                    &(connection_path, wifi_device.clone(), ap_path),
+                )
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            return Ok(());
+        }
+
+        let mut connection: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+        let mut con_section = HashMap::new();
+        con_section.insert("type".to_string(), ov_str("802-11-wireless"));
+        con_section.insert("id".to_string(), ov_str(_ssid));
+        con_section.insert("autoconnect".to_string(), OwnedValue::from(true));
+        connection.insert("connection".to_string(), con_section);
+
+        let mut wifi_section = HashMap::new();
+        wifi_section.insert("ssid".to_string(), ov_bytes(_ssid.as_bytes().to_vec())?);
+        wifi_section.insert("mode".to_string(), ov_str("infrastructure"));
+        connection.insert("802-11-wireless".to_string(), wifi_section);
+
+        if let Some(password) = _password {
+            let mut sec_section = HashMap::new();
+            sec_section.insert("key-mgmt".to_string(), ov_str("wpa-psk"));
+            sec_section.insert("psk".to_string(), ov_str(password));
+            connection.insert("802-11-wireless-security".to_string(), sec_section);
+        }
+
+        let _: (OwnedObjectPath, OwnedObjectPath) = nm
+            .call(
+                "AddAndActivateConnection",
+                &(connection, wifi_device.clone(), ap_path),
+            )
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn disconnect_network(&self, ssid: &str) -> BackendResult<()> {
+        let conn = system_bus()?;
+        let nm = nm_proxy(&conn)?;
+        let active_path = find_active_connection_for_ssid(&conn, &nm, ssid)?
+            .ok_or_else(|| BackendError::Unavailable("No active connection".to_string()))?;
+        let _: () = nm
+            .call("DeactivateConnection", &(active_path))
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        Ok(())
     }
 
     fn connect_hidden(
@@ -184,6 +239,16 @@ fn ap_proxy<'a>(conn: &'a Connection, path: &'a OwnedObjectPath) -> BackendResul
         .map_err(|e| BackendError::Unavailable(e.to_string()))
 }
 
+fn nm_settings_proxy(conn: &Connection) -> BackendResult<Proxy<'_>> {
+    Proxy::new(
+        conn,
+        nm_consts::BUS_NAME,
+        "/org/freedesktop/NetworkManager/Settings",
+        nm_consts::SETTINGS_INTERFACE,
+    )
+    .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
 fn first_wifi_device(conn: &Connection, nm: &Proxy<'_>) -> BackendResult<OwnedObjectPath> {
     let devices: Vec<OwnedObjectPath> = nm
         .call("GetDevices", &())
@@ -214,4 +279,163 @@ fn icon_for_strength(strength: u8) -> &'static str {
         61..=80 => "network-wireless-signal-good",
         _ => "network-wireless-signal-excellent",
     }
+}
+
+fn ov_str(value: &str) -> OwnedValue {
+    OwnedValue::from(Str::from(value))
+}
+
+fn ov_bytes(bytes: Vec<u8>) -> BackendResult<OwnedValue> {
+    OwnedValue::try_from(Array::from(bytes))
+        .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn ssid_from_value(value: &OwnedValue) -> Option<String> {
+    let owned = value.try_clone().ok()?;
+    let bytes: Vec<u8> = Vec::try_from(owned).ok()?;
+    let ssid = String::from_utf8_lossy(&bytes).trim().to_string();
+    if ssid.is_empty() {
+        None
+    } else {
+        Some(ssid)
+    }
+}
+
+fn find_ap_for_ssid(
+    conn: &Connection,
+    wireless: &Proxy<'_>,
+    ssid: &str,
+) -> BackendResult<(OwnedObjectPath, u8)> {
+    let ap_paths: Vec<OwnedObjectPath> = wireless
+        .call("GetAccessPoints", &())
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    let mut best: Option<(OwnedObjectPath, u8)> = None;
+    for ap_path in ap_paths {
+        let (current_ssid, strength) = {
+            let ap = ap_proxy(conn, &ap_path)?;
+            let ssid_bytes: Vec<u8> = ap
+                .get_property("Ssid")
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            let current_ssid = String::from_utf8_lossy(&ssid_bytes).trim().to_string();
+            let strength: u8 = ap
+                .get_property("Strength")
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            (current_ssid, strength)
+        };
+
+        if current_ssid != ssid {
+            continue;
+        }
+        match &best {
+            Some((_, best_strength)) if *best_strength >= strength => {}
+            _ => best = Some((ap_path, strength)),
+        }
+    }
+
+    best.ok_or_else(|| BackendError::Unavailable("SSID not found".to_string()))
+}
+
+fn find_connection_for_ssid(
+    conn: &Connection,
+    settings: &Proxy<'_>,
+    ssid: &str,
+) -> BackendResult<Option<OwnedObjectPath>> {
+    let connections: Vec<OwnedObjectPath> = settings
+        .call("ListConnections", &())
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    for path in connections {
+        let is_match = {
+            let connection_proxy = Proxy::new(
+                conn,
+                nm_consts::BUS_NAME,
+                path.as_str(),
+                nm_consts::CONNECTION_INTERFACE,
+            )
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            let settings_map: HashMap<String, HashMap<String, OwnedValue>> = connection_proxy
+                .call("GetSettings", &())
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            if let Some(wireless) = settings_map.get("802-11-wireless") {
+                if let Some(ssid_value) = wireless.get("ssid") {
+                    if let Some(current_ssid) = ssid_from_value(ssid_value) {
+                        current_ssid == ssid
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if is_match {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
+}
+
+fn find_active_connection_for_ssid(
+    conn: &Connection,
+    nm: &Proxy<'_>,
+    ssid: &str,
+) -> BackendResult<Option<OwnedObjectPath>> {
+    let active: Vec<OwnedObjectPath> = nm
+        .get_property("ActiveConnections")
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    for path in active {
+        let is_match = {
+            let active_proxy = Proxy::new(
+                conn,
+                nm_consts::BUS_NAME,
+                path.as_str(),
+                "org.freedesktop.NetworkManager.Connection.Active",
+            )
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            let connection: OwnedObjectPath = active_proxy
+                .get_property("Connection")
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            let settings_proxy = Proxy::new(
+                conn,
+                nm_consts::BUS_NAME,
+                connection.as_str(),
+                nm_consts::CONNECTION_INTERFACE,
+            )
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            let settings_map: HashMap<String, HashMap<String, OwnedValue>> = settings_proxy
+                .call("GetSettings", &())
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+            if let Some(wireless) = settings_map.get("802-11-wireless") {
+                if let Some(ssid_value) = wireless.get("ssid") {
+                    if let Some(current_ssid) = ssid_from_value(ssid_value) {
+                        current_ssid == ssid
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if is_match {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
 }

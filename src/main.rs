@@ -12,7 +12,7 @@ use gtk4::{
     ListBox, ListBoxRow, Orientation, SearchEntry, Switch,
 };
 use models::{AppState, Network, NetworkAction};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 fn main() {
@@ -54,7 +54,8 @@ fn build_ui(app: &Application) {
     let header = build_header(&state);
     let search = build_search();
     let list = build_network_list();
-    populate_network_list(&list, &state);
+    let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
+    populate_network_list(&list, &state, &action_handler);
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     let hidden = build_hidden_button();
@@ -67,7 +68,44 @@ fn build_ui(app: &Application) {
 
     root.append(&panel);
 
-    wire_actions(&header, &list, &nm_backend, &mock_backend, &toggle_guard);
+    wire_actions(
+        &header,
+        &list,
+        &nm_backend,
+        &mock_backend,
+        &toggle_guard,
+        &action_handler,
+    );
+
+    let list_action = list.clone();
+    let toggle_action = header.toggle.clone();
+    let nm_action = nm_backend.clone();
+    let mock_action = mock_backend.clone();
+    let guard_action = toggle_guard.clone();
+    let handler_ref = action_handler.clone();
+
+    *action_handler.borrow_mut() = Some(Rc::new(move |action| {
+        match action {
+            RowAction::Connect(ssid) => {
+                if let Err(err) = nm_action.connect_network(&ssid, None) {
+                    eprintln!("Connect failed: {err:?}");
+                }
+            }
+            RowAction::Disconnect(ssid) => {
+                if let Err(err) = nm_action.disconnect_network(&ssid) {
+                    eprintln!("Disconnect failed: {err:?}");
+                }
+            }
+        }
+        refresh_ui(
+            &list_action,
+            &toggle_action,
+            &nm_action,
+            &mock_action,
+            &guard_action,
+            &handler_ref,
+        );
+    }));
 
     window.set_child(Some(&root));
     window.present();
@@ -121,7 +159,10 @@ fn build_network_list() -> ListBox {
     list
 }
 
-fn build_network_row(network: &Network) -> ListBoxRow {
+fn build_network_row(
+    network: &Network,
+    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("yufi-row");
     row.set_activatable(false);
@@ -152,11 +193,23 @@ fn build_network_row(network: &Network) -> ListBoxRow {
         NetworkAction::Connect => {
             let button = Button::with_label("Connect");
             button.add_css_class("yufi-primary");
+            button.set_hexpand(true);
+            button.set_halign(Align::Fill);
+            let ssid = network.ssid.clone();
+            let handler = action_handler.clone();
+            button.connect_clicked(move |_| invoke_action(&handler, RowAction::Connect(ssid.clone())));
             container.append(&button);
         }
         NetworkAction::Disconnect => {
             let button = Button::with_label("Disconnect");
             button.add_css_class("yufi-primary");
+            button.set_hexpand(true);
+            button.set_halign(Align::Fill);
+            let ssid = network.ssid.clone();
+            let handler = action_handler.clone();
+            button.connect_clicked(move |_| {
+                invoke_action(&handler, RowAction::Disconnect(ssid.clone()))
+            });
             container.append(&button);
         }
         NetworkAction::None => {}
@@ -172,13 +225,17 @@ fn build_hidden_button() -> Button {
     hidden
 }
 
-fn populate_network_list(list: &ListBox, state: &AppState) {
+fn populate_network_list(
+    list: &ListBox,
+    state: &AppState,
+    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
 
     for network in &state.networks {
-        list.append(&build_network_row(network));
+        list.append(&build_network_row(network, action_handler));
     }
 }
 
@@ -188,12 +245,14 @@ fn wire_actions(
     nm_backend: &Rc<NetworkManagerBackend>,
     mock_backend: &Rc<MockBackend>,
     toggle_guard: &Rc<Cell<bool>>,
+    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
 ) {
     let list_refresh = list.clone();
     let toggle_refresh = header.toggle.clone();
     let nm_refresh = nm_backend.clone();
     let mock_refresh = mock_backend.clone();
     let guard_refresh = toggle_guard.clone();
+    let handler_refresh = action_handler.clone();
     header.refresh.connect_clicked(move |_| {
         if let Err(err) = nm_refresh.request_scan() {
             eprintln!("Scan request failed: {err:?}");
@@ -204,6 +263,7 @@ fn wire_actions(
             &nm_refresh,
             &mock_refresh,
             &guard_refresh,
+            &handler_refresh,
         );
     });
 
@@ -212,6 +272,7 @@ fn wire_actions(
     let nm_toggle = nm_backend.clone();
     let mock_toggle = mock_backend.clone();
     let guard_toggle = toggle_guard.clone();
+    let handler_toggle = action_handler.clone();
     header.toggle.connect_state_set(move |_switch, state| {
         if guard_toggle.get() {
             return Propagation::Proceed;
@@ -227,6 +288,7 @@ fn wire_actions(
             &nm_toggle,
             &mock_toggle,
             &guard_toggle,
+            &handler_toggle,
         );
         Propagation::Proceed
     });
@@ -238,12 +300,27 @@ fn refresh_ui(
     nm_backend: &NetworkManagerBackend,
     mock_backend: &MockBackend,
     toggle_guard: &Cell<bool>,
+    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
 ) {
     let state = load_state_with_backend(nm_backend, mock_backend);
     toggle_guard.set(true);
     toggle.set_active(state.wifi_enabled);
     toggle_guard.set(false);
-    populate_network_list(list, &state);
+    populate_network_list(list, &state, action_handler);
+}
+
+type ActionHandler = Rc<dyn Fn(RowAction)>;
+
+enum RowAction {
+    Connect(String),
+    Disconnect(String),
+}
+
+fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: RowAction) {
+    let handler = action_handler.borrow().clone();
+    if let Some(handler) = handler {
+        handler(action);
+    }
 }
 
 fn load_state_with_backend(

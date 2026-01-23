@@ -69,6 +69,10 @@ impl Backend for MockBackend {
         Ok(())
     }
 
+    fn disconnect_network(&self, _ssid: &str) -> BackendResult<()> {
+        Ok(())
+    }
+
     fn connect_hidden(
         &self,
         _ssid: &str,
