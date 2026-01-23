@@ -1,6 +1,7 @@
 mod backend;
 mod models;
 
+use backend::{Backend, BackendError};
 use backend::mock::MockBackend;
 use gtk4::gdk::Display;
 use gtk4::prelude::*;
@@ -41,7 +42,7 @@ fn build_ui(app: &Application) {
     panel.add_css_class("yufi-panel");
 
     let backend = MockBackend::new();
-    let state = backend.state();
+    let state = backend.load_state().unwrap_or_else(|err| fallback_state(err));
 
     let header = build_header(&state);
     let search = build_search();
@@ -154,6 +155,13 @@ fn build_hidden_button() -> Button {
     let hidden = Button::with_label("Connect to Hidden Network...");
     hidden.add_css_class("yufi-footer");
     hidden
+}
+
+fn fallback_state(_error: BackendError) -> AppState {
+    AppState {
+        wifi_enabled: false,
+        networks: Vec::new(),
+    }
 }
 
 fn load_css() {

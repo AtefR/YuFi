@@ -1,3 +1,4 @@
+use crate::backend::{Backend, BackendResult};
 use crate::models::{AppState, Network, NetworkAction};
 
 pub struct MockBackend;
@@ -7,7 +8,7 @@ impl MockBackend {
         Self
     }
 
-    pub fn state(&self) -> AppState {
+    fn mock_state(&self) -> AppState {
         AppState {
             wifi_enabled: true,
             networks: vec![
@@ -38,5 +39,49 @@ impl MockBackend {
                 },
             ],
         }
+    }
+}
+
+impl Backend for MockBackend {
+    fn load_state(&self) -> BackendResult<AppState> {
+        Ok(self.mock_state())
+    }
+
+    fn set_wifi_enabled(&self, _enabled: bool) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn request_scan(&self) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn connect_network(&self, _ssid: &str, _password: Option<&str>) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn connect_hidden(
+        &self,
+        _ssid: &str,
+        _security: &str,
+        _password: Option<&str>,
+    ) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn set_ip_dns(
+        &self,
+        _ssid: &str,
+        _ip: Option<&str>,
+        _dns: Option<&str>,
+    ) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn get_saved_password(&self, _ssid: &str) -> BackendResult<Option<String>> {
+        Ok(None)
+    }
+
+    fn set_autoreconnect(&self, _ssid: &str, _enabled: bool) -> BackendResult<()> {
+        Ok(())
     }
 }
