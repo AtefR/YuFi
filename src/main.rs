@@ -8,8 +8,8 @@ use gtk4::gdk::Display;
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Image, Label,
-    ListBox, ListBoxRow, Orientation, SearchEntry, Switch,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
+    Label, ListBox, ListBoxRow, Orientation, ResponseType, SearchEntry, Switch,
 };
 use models::{AppState, Network, NetworkAction};
 use std::cell::{Cell, RefCell};
@@ -83,29 +83,71 @@ fn build_ui(app: &Application) {
     let mock_action = mock_backend.clone();
     let guard_action = toggle_guard.clone();
     let handler_ref = action_handler.clone();
+    let window_ref = window.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
             RowAction::Connect(ssid) => {
-                if let Err(err) = nm_action.connect_network(&ssid, None) {
-                    eprintln!("Connect failed: {err:?}");
-                }
+                let nm_action = nm_action.clone();
+                let list_action = list_action.clone();
+                let toggle_action = toggle_action.clone();
+                let mock_action = mock_action.clone();
+                let guard_action = guard_action.clone();
+                let handler_ref = handler_ref.clone();
+                let ssid_clone = ssid.clone();
+                show_password_dialog(&window_ref, &ssid, move |password| {
+                    if let Err(err) =
+                        nm_action.connect_network(&ssid_clone, password.as_deref())
+                    {
+                        eprintln!("Connect failed: {err:?}");
+                    }
+                    refresh_ui(
+                        &list_action,
+                        &toggle_action,
+                        &nm_action,
+                        &mock_action,
+                        &guard_action,
+                        &handler_ref,
+                    );
+                });
             }
             RowAction::Disconnect(ssid) => {
                 if let Err(err) = nm_action.disconnect_network(&ssid) {
                     eprintln!("Disconnect failed: {err:?}");
                 }
+                refresh_ui(
+                    &list_action,
+                    &toggle_action,
+                    &nm_action,
+                    &mock_action,
+                    &guard_action,
+                    &handler_ref,
+                );
             }
         }
-        refresh_ui(
-            &list_action,
-            &toggle_action,
-            &nm_action,
-            &mock_action,
-            &guard_action,
-            &handler_ref,
-        );
     }));
+
+    let hidden_nm = nm_backend.clone();
+    let hidden_mock = mock_backend.clone();
+    let hidden_list = list.clone();
+    let hidden_toggle = header.toggle.clone();
+    let hidden_guard = toggle_guard.clone();
+    let hidden_handler = action_handler.clone();
+    let hidden_window = window.clone();
+    hidden.connect_clicked(move |_| {
+        let nm = hidden_nm.clone();
+        let list = hidden_list.clone();
+        let toggle = hidden_toggle.clone();
+        let mock = hidden_mock.clone();
+        let guard = hidden_guard.clone();
+        let handler = hidden_handler.clone();
+        show_hidden_network_dialog(&hidden_window, move |ssid, password| {
+            if let Err(err) = nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
+                eprintln!("Hidden connect failed: {err:?}");
+            }
+            refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
+        });
+    });
 
     window.set_child(Some(&root));
     window.present();
@@ -321,6 +363,104 @@ fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: Ro
     if let Some(handler) = handler {
         handler(action);
     }
+}
+
+fn show_password_dialog<F: Fn(Option<String>) + 'static>(
+    parent: &ApplicationWindow,
+    ssid: &str,
+    on_submit: F,
+) {
+    let dialog = Dialog::with_buttons(
+        Some("Connect to network"),
+        Some(parent),
+        gtk4::DialogFlags::MODAL,
+        &[
+            ("Cancel", ResponseType::Cancel),
+            ("Connect", ResponseType::Accept),
+        ],
+    );
+
+    let content = dialog.content_area();
+    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
+
+    let label = Label::new(Some(&format!("Password for {ssid}")));
+    label.set_halign(Align::Start);
+    let entry = Entry::new();
+    entry.set_visibility(false);
+    entry.set_placeholder_text(Some("Required"));
+
+    box_.append(&label);
+    box_.append(&entry);
+    content.append(&box_);
+
+    let entry_clone = entry.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Accept {
+            let text = entry_clone.text().to_string();
+            let value = if text.is_empty() { None } else { Some(text) };
+            on_submit(value);
+        }
+        dialog.close();
+    });
+    dialog.show();
+}
+
+fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
+    parent: &ApplicationWindow,
+    on_submit: F,
+) {
+    let dialog = Dialog::with_buttons(
+        Some("Hidden Network"),
+        Some(parent),
+        gtk4::DialogFlags::MODAL,
+        &[
+            ("Cancel", ResponseType::Cancel),
+            ("Connect", ResponseType::Accept),
+        ],
+    );
+
+    let content = dialog.content_area();
+    let box_ = GtkBox::new(Orientation::Vertical, 8);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
+
+    let ssid_label = Label::new(Some("Network Name (SSID)"));
+    ssid_label.set_halign(Align::Start);
+    let ssid_entry = Entry::new();
+    ssid_entry.set_placeholder_text(Some("e.g. Home_WiFi"));
+
+    let pass_label = Label::new(Some("Password"));
+    pass_label.set_halign(Align::Start);
+    let pass_entry = Entry::new();
+    pass_entry.set_visibility(false);
+    pass_entry.set_placeholder_text(Some("Optional"));
+
+    box_.append(&ssid_label);
+    box_.append(&ssid_entry);
+    box_.append(&pass_label);
+    box_.append(&pass_entry);
+    content.append(&box_);
+
+    let ssid_entry = ssid_entry.clone();
+    let pass_entry = pass_entry.clone();
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Accept {
+            let ssid = ssid_entry.text().to_string();
+            if !ssid.is_empty() {
+                let password = pass_entry.text().to_string();
+                let pw = if password.is_empty() { None } else { Some(password) };
+                on_submit(ssid, pw);
+            }
+        }
+        dialog.close();
+    });
+    dialog.show();
 }
 
 fn load_state_with_backend(

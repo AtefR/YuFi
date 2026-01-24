@@ -172,11 +172,50 @@ impl Backend for NetworkManagerBackend {
 
     fn connect_hidden(
         &self,
-        _ssid: &str,
+        ssid: &str,
         _security: &str,
-        _password: Option<&str>,
+        password: Option<&str>,
     ) -> BackendResult<()> {
-        Err(BackendError::NotImplemented)
+        let conn = system_bus()?;
+        let nm = nm_proxy(&conn)?;
+        let wifi_device = first_wifi_device(&conn, &nm)?;
+
+        let settings = nm_settings_proxy(&conn)?;
+        if let Some(connection_path) = find_connection_for_ssid(&conn, &settings, ssid)? {
+            let ap = OwnedObjectPath::try_from("/")
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            let _: OwnedObjectPath = nm
+                .call("ActivateConnection", &(connection_path, wifi_device, ap))
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            return Ok(());
+        }
+
+        let mut connection: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
+        let mut con_section = HashMap::new();
+        con_section.insert("type".to_string(), ov_str("802-11-wireless"));
+        con_section.insert("id".to_string(), ov_str(ssid));
+        con_section.insert("autoconnect".to_string(), OwnedValue::from(true));
+        connection.insert("connection".to_string(), con_section);
+
+        let mut wifi_section = HashMap::new();
+        wifi_section.insert("ssid".to_string(), ov_bytes(ssid.as_bytes().to_vec())?);
+        wifi_section.insert("mode".to_string(), ov_str("infrastructure"));
+        wifi_section.insert("hidden".to_string(), OwnedValue::from(true));
+        connection.insert("802-11-wireless".to_string(), wifi_section);
+
+        if let Some(password) = password {
+            let mut sec_section = HashMap::new();
+            sec_section.insert("key-mgmt".to_string(), ov_str("wpa-psk"));
+            sec_section.insert("psk".to_string(), ov_str(password));
+            connection.insert("802-11-wireless-security".to_string(), sec_section);
+        }
+
+        let ap_path = OwnedObjectPath::try_from("/").map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        let _: (OwnedObjectPath, OwnedObjectPath) = nm
+            .call("AddAndActivateConnection", &(connection, wifi_device.clone(), ap_path))
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+        Ok(())
     }
 
     fn set_ip_dns(
