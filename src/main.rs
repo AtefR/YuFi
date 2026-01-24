@@ -10,7 +10,7 @@ use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
-    Label, ListBox, ListBoxRow, Orientation, ResponseType, SearchEntry, Switch,
+    Label, ListBox, ListBoxRow, Orientation, ResponseType, SearchEntry, Spinner, Switch,
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
@@ -208,6 +208,7 @@ struct HeaderWidgets {
     container: GtkBox,
     toggle: Switch,
     refresh: Button,
+    spinner: Spinner,
 }
 
 fn build_header(state: &AppState) -> HeaderWidgets {
@@ -223,16 +224,22 @@ fn build_header(state: &AppState) -> HeaderWidgets {
     let refresh = Button::builder().icon_name("view-refresh").build();
     refresh.add_css_class("yufi-icon-button");
 
+    let spinner = Spinner::new();
+    spinner.set_visible(false);
+    spinner.add_css_class("yufi-spinner");
+
     let toggle = Switch::builder().active(state.wifi_enabled).build();
 
     header.append(&title);
     header.append(&refresh);
+    header.append(&spinner);
     header.append(&toggle);
 
     HeaderWidgets {
         container: header,
         toggle,
         refresh,
+        spinner,
     }
 }
 
@@ -364,7 +371,12 @@ fn wire_actions(
     let guard_refresh = toggle_guard.clone();
     let handler_refresh = action_handler.clone();
     let status_refresh = status.clone();
+    let spinner_refresh = header.spinner.clone();
+    let refresh_button = header.refresh.clone();
     header.refresh.connect_clicked(move |_| {
+        spinner_refresh.set_visible(true);
+        spinner_refresh.start();
+        refresh_button.set_sensitive(false);
         match nm_refresh.request_scan() {
             Ok(_) => status_refresh(StatusKind::Info, "Scan requested".to_string()),
             Err(err) => status_refresh(StatusKind::Error, format!("Scan failed: {err:?}")),
@@ -377,6 +389,29 @@ fn wire_actions(
             &guard_refresh,
             &handler_refresh,
         );
+
+        let list_refresh = list_refresh.clone();
+        let toggle_refresh = toggle_refresh.clone();
+        let nm_refresh = nm_refresh.clone();
+        let mock_refresh = mock_refresh.clone();
+        let guard_refresh = guard_refresh.clone();
+        let handler_refresh = handler_refresh.clone();
+        let spinner_refresh = spinner_refresh.clone();
+        let refresh_button = refresh_button.clone();
+        gtk4::glib::timeout_add_local(Duration::from_millis(2000), move || {
+            refresh_ui(
+                &list_refresh,
+                &toggle_refresh,
+                &nm_refresh,
+                &mock_refresh,
+                &guard_refresh,
+                &handler_refresh,
+            );
+            spinner_refresh.stop();
+            spinner_refresh.set_visible(false);
+            refresh_button.set_sensitive(true);
+            ControlFlow::Break
+        });
     });
 
     let list_toggle = list.clone();
@@ -923,6 +958,10 @@ fn load_css() {
     .yufi-icon-button {
         background: transparent;
         border-radius: 10px;
+    }
+
+    .yufi-spinner {
+        margin-right: 2px;
     }
     "#;
 
