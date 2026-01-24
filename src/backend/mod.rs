@@ -4,9 +4,7 @@ use crate::models::{AppState, NetworkDetails};
 
 #[derive(Debug)]
 pub enum BackendError {
-    NotImplemented,
     Unavailable(String),
-    PermissionDenied,
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -15,14 +13,14 @@ pub trait Backend {
     fn load_state(&self) -> BackendResult<AppState>;
     fn set_wifi_enabled(&self, enabled: bool) -> BackendResult<()>;
     fn request_scan(&self) -> BackendResult<()>;
-    fn connect_network(&self, ssid: &str, password: Option<&str>) -> BackendResult<()>;
+    fn connect_network(&self, ssid: &str, password: Option<&str>) -> BackendResult<Option<String>>;
     fn disconnect_network(&self, ssid: &str) -> BackendResult<()>;
     fn connect_hidden(
         &self,
         ssid: &str,
         security: &str,
         password: Option<&str>,
-    ) -> BackendResult<()>;
+    ) -> BackendResult<Option<String>>;
     fn get_network_details(&self, ssid: &str) -> BackendResult<NetworkDetails>;
     fn set_ip_dns(
         &self,

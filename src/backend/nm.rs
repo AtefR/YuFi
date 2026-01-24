@@ -31,7 +31,7 @@ impl Backend for NetworkManagerBackend {
         let active_ap: OwnedObjectPath = wireless
             .get_property("ActiveAccessPoint")
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-        let active_specific_ap = active_specific_ap_for_device(&conn, &wifi_device)?;
+        let (active_specific_ap, active_ok) = active_connection_info_for_device(&conn, &wifi_device)?;
 
         let ap_paths: Vec<OwnedObjectPath> = wireless
             .call("GetAccessPoints", &())
@@ -54,10 +54,14 @@ impl Backend for NetworkManagerBackend {
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
             let is_secure = ap_is_secure(&ap_proxy)?;
 
-            let is_active = if let Some(active_ap) = active_specific_ap.as_ref() {
-                ap_path == *active_ap
-            } else if active_ap.as_str() != "/" {
-                ap_path == active_ap
+            let is_active = if active_ok {
+                if let Some(active_ap) = active_specific_ap.as_ref() {
+                    ap_path == *active_ap
+                } else if active_ap.as_str() != "/" {
+                    ap_path == active_ap
+                } else {
+                    false
+                }
             } else {
                 false
             };
@@ -127,7 +131,7 @@ impl Backend for NetworkManagerBackend {
             .map_err(|e| BackendError::Unavailable(e.to_string()))
     }
 
-    fn connect_network(&self, _ssid: &str, _password: Option<&str>) -> BackendResult<()> {
+    fn connect_network(&self, _ssid: &str, _password: Option<&str>) -> BackendResult<Option<String>> {
         let conn = system_bus()?;
         let nm = nm_proxy(&conn)?;
         let wifi_device = first_wifi_device(&conn, &nm)?;
@@ -137,13 +141,13 @@ impl Backend for NetworkManagerBackend {
 
         let settings = nm_settings_proxy(&conn)?;
         if let Some(connection_path) = find_connection_for_ssid(&conn, &settings, _ssid)? {
-            let _: OwnedObjectPath = nm
+            let active_path: OwnedObjectPath = nm
                 .call(
                     "ActivateConnection",
                     &(connection_path, wifi_device.clone(), ap_path),
                 )
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-            return Ok(());
+            return Ok(Some(active_path.as_str().to_string()));
         }
 
         let mut connection: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
@@ -165,14 +169,14 @@ impl Backend for NetworkManagerBackend {
             connection.insert("802-11-wireless-security".to_string(), sec_section);
         }
 
-        let _: (OwnedObjectPath, OwnedObjectPath) = nm
+        let (_, active_path): (OwnedObjectPath, OwnedObjectPath) = nm
             .call(
                 "AddAndActivateConnection",
                 &(connection, wifi_device.clone(), ap_path),
             )
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-        Ok(())
+        Ok(Some(active_path.as_str().to_string()))
     }
 
     fn disconnect_network(&self, ssid: &str) -> BackendResult<()> {
@@ -191,7 +195,7 @@ impl Backend for NetworkManagerBackend {
         ssid: &str,
         _security: &str,
         password: Option<&str>,
-    ) -> BackendResult<()> {
+    ) -> BackendResult<Option<String>> {
         let conn = system_bus()?;
         let nm = nm_proxy(&conn)?;
         let wifi_device = first_wifi_device(&conn, &nm)?;
@@ -200,10 +204,10 @@ impl Backend for NetworkManagerBackend {
         if let Some(connection_path) = find_connection_for_ssid(&conn, &settings, ssid)? {
             let ap = OwnedObjectPath::try_from("/")
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-            let _: OwnedObjectPath = nm
+            let active_path: OwnedObjectPath = nm
                 .call("ActivateConnection", &(connection_path, wifi_device, ap))
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-            return Ok(());
+            return Ok(Some(active_path.as_str().to_string()));
         }
 
         let mut connection: HashMap<String, HashMap<String, OwnedValue>> = HashMap::new();
@@ -226,12 +230,13 @@ impl Backend for NetworkManagerBackend {
             connection.insert("802-11-wireless-security".to_string(), sec_section);
         }
 
-        let ap_path = OwnedObjectPath::try_from("/").map_err(|e| BackendError::Unavailable(e.to_string()))?;
-        let _: (OwnedObjectPath, OwnedObjectPath) = nm
+        let ap_path = OwnedObjectPath::try_from("/")
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        let (_, active_path): (OwnedObjectPath, OwnedObjectPath) = nm
             .call("AddAndActivateConnection", &(connection, wifi_device.clone(), ap_path))
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-        Ok(())
+        Ok(Some(active_path.as_str().to_string()))
     }
 
     fn get_network_details(&self, ssid: &str) -> BackendResult<NetworkDetails> {
@@ -381,6 +386,12 @@ impl Backend for NetworkManagerBackend {
     fn forget_network(&self, ssid: &str) -> BackendResult<()> {
         let conn = system_bus()?;
         let settings = nm_settings_proxy(&conn)?;
+        let nm = nm_proxy(&conn)?;
+        if let Ok(Some(active_path)) = find_active_connection_for_ssid(&conn, &nm, ssid) {
+            let _: () = nm
+                .call("DeactivateConnection", &(active_path))
+                .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        }
         let connection_path = find_connection_for_ssid(&conn, &settings, ssid)?
             .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
 
@@ -780,17 +791,17 @@ fn find_active_connection_for_ssid(
     Ok(None)
 }
 
-fn active_specific_ap_for_device(
+fn active_connection_info_for_device(
     conn: &Connection,
     device_path: &OwnedObjectPath,
-) -> BackendResult<Option<OwnedObjectPath>> {
+) -> BackendResult<(Option<OwnedObjectPath>, bool)> {
     let device = device_proxy(conn, device_path)?;
     let active: OwnedObjectPath = device
         .get_property("ActiveConnection")
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
     if active.as_str() == "/" {
-        return Ok(None);
+        return Ok((None, false));
     }
 
     let active_proxy = Proxy::new(
@@ -801,13 +812,21 @@ fn active_specific_ap_for_device(
     )
     .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
+    let state: u32 = active_proxy
+        .get_property("State")
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    let activated = state == 2;
+    if !activated {
+        return Ok((None, false));
+    }
+
     let specific: OwnedObjectPath = active_proxy
         .get_property("SpecificObject")
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
     if specific.as_str() == "/" {
-        Ok(None)
+        Ok((None, true))
     } else {
-        Ok(Some(specific))
+        Ok((Some(specific), true))
     }
 }

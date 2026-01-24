@@ -14,7 +14,7 @@ use gtk4::{
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -69,6 +69,8 @@ fn build_ui(app: &Application) {
     let list = build_network_list();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
+    let pending_connect = Rc::new(RefCell::new(None::<PendingConnect>));
+    let failed_connects = Rc::new(RefCell::new(HashSet::<String>::new()));
     let filtered_state = filter_state(&state, &search.text().to_string());
     let empty_label = empty_label_for(
         &state,
@@ -81,6 +83,11 @@ fn build_ui(app: &Application) {
         &action_handler,
         optimistic_active.borrow().as_deref(),
         empty_label,
+        pending_connect
+            .borrow()
+            .as_ref()
+            .map(|pending| pending.ssid.as_str()),
+        &failed_connects.borrow(),
     );
     let status_container = Rc::new(StatusContainer {
         dialog_label: Rc::new(RefCell::new(None)),
@@ -103,6 +110,7 @@ fn build_ui(app: &Application) {
         &list,
         &nm_backend,
         &state_cache,
+        &failed_connects,
         &toggle_guard,
         &window,
         &status_handler,
@@ -116,6 +124,8 @@ fn build_ui(app: &Application) {
     let handler_search = action_handler.clone();
     let state_search = state_cache.clone();
     let optimistic_search = optimistic_active.clone();
+    let pending_search = pending_connect.clone();
+    let failed_search = failed_connects.clone();
     search.connect_changed(move |entry| {
         let query = entry.text().to_string();
         let state = state_search.borrow().clone();
@@ -127,6 +137,11 @@ fn build_ui(app: &Application) {
             &handler_search,
             optimistic_search.borrow().as_deref(),
             empty_label,
+            pending_search
+                .borrow()
+                .as_ref()
+                .map(|pending| pending.ssid.as_str()),
+            &failed_search.borrow(),
         );
     });
 
@@ -143,7 +158,7 @@ fn build_ui(app: &Application) {
                     let ssid_clone = ssid.clone();
                     loading_action.start();
                     update_loading_ui(header_action.as_ref(), &loading_action);
-                    spawn_connect_task(&ui_tx_action, ssid_clone, None, false);
+                    spawn_connect_task(&ui_tx_action, ssid_clone, None, false, true);
                 } else {
                     prompt_connect_dialog(
                         &window_action,
@@ -152,6 +167,8 @@ fn build_ui(app: &Application) {
                         &header_action,
                         &ui_tx_action,
                         &status_container_connect,
+                        false,
+                        None,
                     );
                 }
             }
@@ -200,6 +217,8 @@ fn build_ui(app: &Application) {
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
     let optimistic_active_rx = optimistic_active.clone();
+    let pending_connect_rx = pending_connect.clone();
+    let failed_connects_rx = failed_connects.clone();
     let refresh_guard = Rc::new(Cell::new(false));
     let refresh_guard_rx = refresh_guard.clone();
     let refresh_guard_signal = refresh_guard.clone();
@@ -225,16 +244,36 @@ fn build_ui(app: &Application) {
                     if state.networks.iter().any(|n| matches!(n.action, NetworkAction::Disconnect)) {
                         *optimistic_active_rx.borrow_mut() = None;
                     }
+                    let pending = pending_connect_rx.borrow().clone();
+                    if let Some(pending) = pending {
+                        let is_active = state.networks.iter().any(|network| {
+                            network.ssid == pending.ssid
+                                && matches!(network.action, NetworkAction::Disconnect)
+                        });
+                        if is_active {
+                            status_rx(StatusKind::Info, String::new());
+                            *pending_connect_rx.borrow_mut() = None;
+                            *optimistic_active_rx.borrow_mut() = None;
+                            failed_connects_rx.borrow_mut().remove(&pending.ssid);
+                        }
+                    }
                     *state_cache_rx.borrow_mut() = state.clone();
                     let query = search_rx.text().to_string();
                     let filtered = filter_state(&state, &query);
                     let empty_label = empty_label_for(&state, &query, filtered.networks.len());
+                    let pending_ssid_owned = pending_connect_rx
+                        .borrow()
+                        .as_ref()
+                        .map(|pending| pending.ssid.clone());
+                    let pending_ssid = pending_ssid_owned.as_deref();
                     populate_network_list(
                         &list_rx,
                         &filtered,
                         &handler_rx,
                         optimistic_active_rx.borrow().as_deref(),
                         empty_label,
+                        pending_ssid,
+                        &failed_connects_rx.borrow(),
                     );
                 }
                 UiEvent::ScanDone(result) => {
@@ -243,10 +282,12 @@ fn build_ui(app: &Application) {
                     spinner_rx.stop();
                     refresh_stack_rx.set_visible_child_name("refresh");
                     refresh_button_rx.set_sensitive(true);
-                    match result {
-                        Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
-                        Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
-                    }
+    match result {
+        Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
+        Err(err) => {
+            status_rx(StatusKind::Error, format!("Scan failed: {}", friendly_error(&err)))
+        }
+    }
                     // Updates should arrive via D-Bus signals.
                 }
                 UiEvent::WifiSet { enabled, result } => {
@@ -259,24 +300,36 @@ fn build_ui(app: &Application) {
                             status_rx(StatusKind::Success, label.to_string());
                         }
                         Err(err) => {
-                            status_rx(StatusKind::Error, format!("Failed to set Wi‑Fi: {err:?}"));
+                            status_rx(
+                                StatusKind::Error,
+                                format!("Failed to set Wi‑Fi: {}", friendly_error(&err)),
+                            );
                         }
                     }
                     if is_err {
                         request_state_refresh(&ui_tx_rx);
                     }
                 }
-                UiEvent::ConnectDone { ssid, result, from_password } => {
+                UiEvent::ConnectDone { ssid, result, from_password, was_saved } => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
                     match result {
-                        Ok(_) => {
-                            *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
-                            status_rx(StatusKind::Success, format!("Connected to {ssid}"));
-                        // Updates should arrive via D-Bus signals.
-                    }
+                        Ok(active_path) => {
+                            *pending_connect_rx.borrow_mut() = Some(PendingConnect {
+                                ssid: ssid.clone(),
+                                was_saved,
+                                from_password,
+                            });
+                            status_rx(StatusKind::Info, String::new());
+                            if let Some(path) = active_path {
+                                spawn_active_connection_listener(&ui_tx_rx, ssid.clone(), path);
+                            } else {
+                                request_state_refresh(&ui_tx_rx);
+                            }
+                        }
                         Err(err) => {
                             *optimistic_active_rx.borrow_mut() = None;
+                            *pending_connect_rx.borrow_mut() = None;
                             if !from_password && needs_password(&err) {
                                 let loading_retry = loading_rx.clone();
                                 let header_retry = header_rx.clone();
@@ -286,6 +339,7 @@ fn build_ui(app: &Application) {
                                 show_password_dialog(
                                     &window_rx,
                                     &ssid,
+                                    None,
                                     move |password| {
                                         loading_retry.start();
                                         update_loading_ui(header_retry.as_ref(), &loading_retry);
@@ -294,14 +348,41 @@ fn build_ui(app: &Application) {
                                             ssid_retry.clone(),
                                             password.clone(),
                                             password.is_some(),
+                                            true,
                                         );
                                     },
                                     (*status_container_retry).clone(),
                                 );
                             } else {
-                                status_rx(StatusKind::Error, format!("Connect failed: {err:?}"));
+                                let message = connect_error_message(&err, from_password);
+                                status_rx(
+                                    StatusKind::Error,
+                                    format!("Connect failed: {message}"),
+                                );
                                 if from_password {
-                                    status_container_rx.show_dialog_error(format!("{err:?}"));
+                                    let loading_retry = loading_rx.clone();
+                                    let header_retry = header_rx.clone();
+                                    let ui_tx_retry = ui_tx_rx.clone();
+                                    let ssid_retry = ssid.clone();
+                                    let ssid_label = ssid.clone();
+                                    let status_container_retry = status_container_rx.clone();
+                                    show_password_dialog(
+                                        &window_rx,
+                                        &ssid_label,
+                                        Some(message),
+                                        move |password| {
+                                            loading_retry.start();
+                                            update_loading_ui(header_retry.as_ref(), &loading_retry);
+                                            spawn_connect_task(
+                                                &ui_tx_retry,
+                                                ssid_retry.clone(),
+                                                password.clone(),
+                                                password.is_some(),
+                                                true,
+                                            );
+                                        },
+                                        (*status_container_retry).clone(),
+                                    );
                                 }
                             }
                         }
@@ -312,25 +393,124 @@ fn build_ui(app: &Application) {
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
                     match result {
                         Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
-                    Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
+                        Err(err) => status_rx(
+                            StatusKind::Error,
+                            format!("Disconnect failed: {}", friendly_error(&err)),
+                        ),
+                    }
+                    *optimistic_active_rx.borrow_mut() = None;
+                    *pending_connect_rx.borrow_mut() = None;
+                    failed_connects_rx.borrow_mut().remove(&ssid);
+                    // Updates should arrive via D-Bus signals.
                 }
-                *optimistic_active_rx.borrow_mut() = None;
-                // Updates should arrive via D-Bus signals.
-            }
                 UiEvent::HiddenDone { ssid, result } => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
                     match result {
-                        Ok(_) => {
-                            *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
-                        status_rx(StatusKind::Success, format!("Connected to {ssid}"));
-                    }
-                    Err(err) => {
-                        status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
+                        Ok(active_path) => {
+                            *pending_connect_rx.borrow_mut() = Some(PendingConnect {
+                                ssid: ssid.clone(),
+                                was_saved: false,
+                                from_password: true,
+                            });
+                            status_rx(StatusKind::Info, String::new());
+                            if let Some(path) = active_path {
+                                spawn_active_connection_listener(&ui_tx_rx, ssid.clone(), path);
+                            } else {
+                                request_state_refresh(&ui_tx_rx);
+                            }
+                        }
+                        Err(err) => {
+                            status_rx(
+                                StatusKind::Error,
+                                format!("Hidden connect failed: {}", friendly_error(&err)),
+                            );
+                        }
                     }
                 }
-                // Updates should arrive via D-Bus signals.
-            }
+                UiEvent::ActiveState { ssid, state } => {
+                    let pending = pending_connect_rx.borrow().clone();
+                    if let Some(pending) = pending {
+                        if pending.ssid != ssid {
+                            continue;
+                        }
+                        let is_secure = state_cache_rx
+                            .borrow()
+                            .networks
+                            .iter()
+                            .find(|network| network.ssid == ssid)
+                            .map(|network| network.is_secure)
+                            .unwrap_or(false);
+                        if state == 2 {
+                            status_rx(StatusKind::Info, String::new());
+                            *pending_connect_rx.borrow_mut() = None;
+                            *optimistic_active_rx.borrow_mut() = None;
+                            failed_connects_rx.borrow_mut().remove(&ssid);
+                            request_state_refresh(&ui_tx_rx);
+                        } else if state == 4 {
+                            let message = if pending.from_password || is_secure {
+                                "Incorrect password. Try again.".to_string()
+                            } else {
+                                "Failed to connect. Check signal and try again.".to_string()
+                            };
+                            status_rx(
+                                StatusKind::Error,
+                                format!("Failed to connect to {}. {message}", ssid),
+                            );
+                            *pending_connect_rx.borrow_mut() = None;
+                            *optimistic_active_rx.borrow_mut() = None;
+                            if pending.from_password || is_secure {
+                                failed_connects_rx.borrow_mut().insert(ssid.clone());
+                            }
+                            if !pending.was_saved {
+                                let ssid_cleanup = ssid.clone();
+                                spawn_task(&ui_tx_rx, move || {
+                                    let backend = NetworkManagerBackend::new();
+                                    let result = backend.forget_network(&ssid_cleanup);
+                                    UiEvent::CleanupResult { ssid: ssid_cleanup, result }
+                                });
+                            }
+                            request_state_refresh(&ui_tx_rx);
+                            if pending.from_password || is_secure {
+                                let loading_retry = loading_rx.clone();
+                                let header_retry = header_rx.clone();
+                                let ui_tx_retry = ui_tx_rx.clone();
+                                let status_container_retry = status_container_rx.clone();
+                                let ssid_retry = ssid.clone();
+                                let ssid_label = ssid.clone();
+                                let was_saved = pending.was_saved;
+                                show_password_dialog(
+                                    &window_rx,
+                                    &ssid_label,
+                                    Some("Incorrect password. Try again.".to_string()),
+                                    move |password| {
+                                        loading_retry.start();
+                                        update_loading_ui(header_retry.as_ref(), &loading_retry);
+                                        spawn_connect_task(
+                                            &ui_tx_retry,
+                                            ssid_retry.clone(),
+                                            password.clone(),
+                                            password.is_some(),
+                                            was_saved,
+                                        );
+                                    },
+                                    (*status_container_retry).clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                UiEvent::CleanupResult { ssid, result } => {
+                    if let Err(err) = result {
+                        status_rx(
+                            StatusKind::Error,
+                            format!(
+                                "Failed to remove saved profile for {ssid}: {}",
+                                friendly_error(&err)
+                            ),
+                        );
+                    }
+                }
                 UiEvent::RefreshRequested => {
                     if refresh_guard_rx.get() {
                         continue;
@@ -447,6 +627,7 @@ fn build_search() -> SearchEntry {
 fn build_status() -> (GtkBox, Label) {
     let status_bar = GtkBox::new(Orientation::Horizontal, 0);
     status_bar.add_css_class("yufi-status-bar");
+    status_bar.set_visible(false);
 
     let status = Label::new(None);
     status.add_css_class("yufi-status");
@@ -472,9 +653,14 @@ fn build_network_row(
     network: &Network,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     effective_action: NetworkAction,
+    is_connecting: bool,
+    has_error: bool,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("yufi-row");
+    if has_error {
+        row.add_css_class("yufi-row-error");
+    }
     row.set_activatable(true);
     row.set_widget_name(&format!("ssid:{}", network.ssid));
 
@@ -496,11 +682,18 @@ fn build_network_row(
     icon.add_css_class("yufi-network-icon");
     let icon_row = GtkBox::new(Orientation::Horizontal, 6);
     icon_row.set_halign(Align::End);
-    if network.is_secure {
-        let lock = Image::from_icon_name("changes-prevent-symbolic");
-        lock.add_css_class("yufi-network-lock");
-        icon_row.append(&lock);
-    }
+    let lock_icon = if network.is_secure {
+        "changes-prevent-symbolic"
+    } else {
+        "changes-allow-symbolic"
+    };
+    let lock = Image::from_icon_name(lock_icon);
+    lock.add_css_class(if network.is_secure {
+        "yufi-network-lock"
+    } else {
+        "yufi-network-lock-open"
+    });
+    icon_row.append(&lock);
     icon_row.append(&icon);
 
     top.append(&label);
@@ -510,24 +703,34 @@ fn build_network_row(
 
     match effective_action {
         NetworkAction::Connect => {
-            let button = Button::with_label("Connect");
-            button.add_css_class("yufi-primary");
-            button.add_css_class("suggested-action");
-            button.set_hexpand(true);
-            button.set_halign(Align::Fill);
-            let ssid = network.ssid.clone();
-            let is_saved = network.is_saved;
-            let handler = action_handler.clone();
-            button.connect_clicked(move |_| {
-                invoke_action(
-                    &handler,
-                    RowAction::Connect {
-                        ssid: ssid.clone(),
-                        is_saved,
-                    },
-                )
-            });
-            container.append(&button);
+            if is_connecting {
+                let loading = GtkBox::new(Orientation::Horizontal, 0);
+                loading.set_hexpand(true);
+                loading.set_halign(Align::Center);
+                let spinner = Spinner::new();
+                spinner.start();
+                loading.append(&spinner);
+                container.append(&loading);
+            } else {
+                let button = Button::with_label("Connect");
+                button.add_css_class("yufi-primary");
+                button.add_css_class("suggested-action");
+                button.set_hexpand(true);
+                button.set_halign(Align::Fill);
+                let ssid = network.ssid.clone();
+                let is_saved = network.is_saved;
+                let handler = action_handler.clone();
+                button.connect_clicked(move |_| {
+                    invoke_action(
+                        &handler,
+                        RowAction::Connect {
+                            ssid: ssid.clone(),
+                            is_saved,
+                        },
+                    )
+                });
+                container.append(&button);
+            }
         }
         NetworkAction::Disconnect => {
             let button = Button::with_label("Disconnect");
@@ -581,6 +784,8 @@ fn populate_network_list(
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     optimistic_active: Option<&str>,
     empty_label: Option<&str>,
+    pending_ssid: Option<&str>,
+    failed_connects: &HashSet<String>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -595,7 +800,15 @@ fn populate_network_list(
 
     for network in &state.networks {
         let effective_action = effective_action_for(state, network, optimistic_active);
-        list.append(&build_network_row(network, action_handler, effective_action));
+        let is_connecting = pending_ssid == Some(network.ssid.as_str());
+        let has_error = failed_connects.contains(&network.ssid);
+        list.append(&build_network_row(
+            network,
+            action_handler,
+            effective_action,
+            is_connecting,
+            has_error,
+        ));
     }
 }
 
@@ -655,6 +868,7 @@ fn wire_actions(
     list: &ListBox,
     nm_backend: &Rc<NetworkManagerBackend>,
     state_cache: &Rc<RefCell<AppState>>,
+    failed_connects: &Rc<RefCell<HashSet<String>>>,
     toggle_guard: &Rc<Cell<bool>>,
     parent: &ApplicationWindow,
     status: &StatusHandler,
@@ -703,8 +917,13 @@ fn wire_actions(
     let header_details = header_ref.clone();
     let ui_tx_details = ui_tx.clone();
     let state_details = state_cache.clone();
+    let failed_details = failed_connects.clone();
     list.connect_row_activated(move |_list, row| {
         if let Some(ssid) = ssid_from_row(row) {
+            let pending_error = failed_details
+                .borrow()
+                .get(&ssid)
+                .map(|_| "Incorrect password. Try again.".to_string());
             let is_saved = state_details
                 .borrow()
                 .networks
@@ -713,7 +932,7 @@ fn wire_actions(
                 .map(|network| network.is_saved)
                 .unwrap_or(false);
 
-            if is_saved {
+            if is_saved && pending_error.is_none() {
                 show_network_details_dialog(
                     &window_details,
                     &ssid,
@@ -721,6 +940,7 @@ fn wire_actions(
                     ui_tx_details.clone(),
                     status_details.clone(),
                     (*status_details_container).clone(),
+                    failed_details.clone(),
                 );
             } else {
                 prompt_connect_dialog(
@@ -730,6 +950,8 @@ fn wire_actions(
                     &header_details,
                     &ui_tx_details,
                     &status_details_container,
+                    false,
+                    pending_error,
                 );
             }
         }
@@ -756,14 +978,23 @@ enum UiEvent {
     },
     ConnectDone {
         ssid: String,
-        result: Result<(), BackendError>,
+        result: Result<Option<String>, BackendError>,
         from_password: bool,
+        was_saved: bool,
     },
     DisconnectDone {
         ssid: String,
         result: Result<(), BackendError>,
     },
     HiddenDone {
+        ssid: String,
+        result: Result<Option<String>, BackendError>,
+    },
+    ActiveState {
+        ssid: String,
+        state: u32,
+    },
+    CleanupResult {
         ssid: String,
         result: Result<(), BackendError>,
     },
@@ -773,6 +1004,13 @@ enum UiEvent {
 enum RowAction {
     Connect { ssid: String, is_saved: bool },
     Disconnect(String),
+}
+
+#[derive(Clone)]
+struct PendingConnect {
+    ssid: String,
+    was_saved: bool,
+    from_password: bool,
 }
 
 const NM_BUS_NAME: &str = "org.freedesktop.NetworkManager";
@@ -816,8 +1054,11 @@ fn build_status_handler(label: &Label) -> StatusHandler {
 }
 
 fn show_status(label: &Label, kind: StatusKind, text: &str) {
+    if text.is_empty() || matches!(kind, StatusKind::Info) {
+        return;
+    }
     label.set_text(text);
-    label.set_visible(!text.is_empty());
+    label.set_visible(true);
     label.remove_css_class("yufi-status-ok");
     label.remove_css_class("yufi-status-error");
 
@@ -880,6 +1121,7 @@ fn spawn_connect_task(
     ssid: String,
     password: Option<String>,
     from_password: bool,
+    was_saved: bool,
 ) {
     spawn_task(ui_tx, move || {
         let backend = NetworkManagerBackend::new();
@@ -888,6 +1130,7 @@ fn spawn_connect_task(
             ssid,
             result,
             from_password,
+            was_saved,
         }
     });
 }
@@ -1026,6 +1269,71 @@ fn find_wifi_device_path(conn: &Connection) -> Option<OwnedObjectPath> {
     None
 }
 
+fn spawn_active_connection_listener(
+    ui_tx: &mpsc::Sender<UiEvent>,
+    ssid: String,
+    path: String,
+) {
+    let tx = ui_tx.clone();
+    thread::spawn(move || {
+        let Ok(conn) = Connection::system() else { return };
+        let Ok(proxy) = Proxy::new(
+            &conn,
+            NM_BUS_NAME,
+            path.as_str(),
+            "org.freedesktop.NetworkManager.Connection.Active",
+        ) else {
+            return;
+        };
+
+        if let Ok(state) = proxy.get_property::<u32>("State") {
+            let _ = tx.send(UiEvent::ActiveState {
+                ssid: ssid.clone(),
+                state,
+            });
+            if state == 2 || state == 4 {
+                return;
+            }
+        }
+
+        let Ok(props) = Proxy::new(
+            &conn,
+            NM_BUS_NAME,
+            path.as_str(),
+            "org.freedesktop.DBus.Properties",
+        ) else {
+            return;
+        };
+        let Ok(mut stream) = props.receive_signal("PropertiesChanged") else { return };
+        while let Some(signal) = stream.next() {
+            let Ok((iface, changed, _invalidated)) =
+                signal
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            else {
+                continue;
+            };
+            if iface != "org.freedesktop.NetworkManager.Connection.Active" {
+                continue;
+            }
+            let Some(value) = changed.get("State") else { continue };
+            let Some(state) = owned_value_to_u32(value) else { continue };
+            let _ = tx.send(UiEvent::ActiveState {
+                ssid: ssid.clone(),
+                state,
+            });
+            if state == 2 || state == 4 {
+                break;
+            }
+        }
+    });
+}
+
+fn owned_value_to_u32(value: &OwnedValue) -> Option<u32> {
+    let owned = value.try_clone().ok()?;
+    u32::try_from(owned).ok()
+}
+
 fn needs_password(err: &BackendError) -> bool {
     match err {
         BackendError::Unavailable(message) => {
@@ -1035,8 +1343,6 @@ fn needs_password(err: &BackendError) -> bool {
                 || msg.contains("psk")
                 || msg.contains("wireless-security")
         }
-        BackendError::PermissionDenied => true,
-        BackendError::NotImplemented => false,
     }
 }
 
@@ -1050,8 +1356,33 @@ fn password_error_message(err: &BackendError) -> String {
             }
             format!("Failed to load password: {err:?}")
         }
-        _ => format!("Failed to load password: {err:?}"),
     }
+}
+
+fn friendly_error(err: &BackendError) -> String {
+    match err {
+        BackendError::Unavailable(message) => {
+            let msg = message.to_lowercase();
+            if msg.contains("nosecrets") || msg.contains("no agents") || msg.contains("no agent") {
+                return "No secrets agent. Start a polkit agent (e.g. polkit-gnome).".to_string();
+            }
+            if msg.contains("no wi") && msg.contains("device") {
+                return "No Wi‑Fi device found.".to_string();
+            }
+            message.clone()
+        }
+    }
+}
+
+fn connect_error_message(err: &BackendError, from_password: bool) -> String {
+    if from_password {
+        let BackendError::Unavailable(message) = err;
+        let msg = message.to_lowercase();
+        if msg.contains("auth") || msg.contains("password") || msg.contains("psk") {
+            return "Incorrect password. Try again.".to_string();
+        }
+    }
+    friendly_error(err)
 }
 
 struct ParsedNetworkInput {
@@ -1181,6 +1512,7 @@ fn show_network_details_dialog(
     ui_tx: mpsc::Sender<UiEvent>,
     status: StatusHandler,
     status_container: StatusContainer,
+    failed_connects: Rc<RefCell<HashSet<String>>>,
 ) {
     let dialog = Dialog::new();
     dialog.set_title(Some("Network Details"));
@@ -1198,7 +1530,8 @@ fn show_network_details_dialog(
     let error_label = Label::new(None);
     error_label.add_css_class("yufi-dialog-error");
     error_label.set_halign(Align::Start);
-    error_label.set_visible(false);
+        error_label.set_text("");
+        error_label.set_visible(true);
     status_container.register_dialog_label(&error_label);
 
     let title = Label::new(Some(ssid));
@@ -1227,6 +1560,7 @@ fn show_network_details_dialog(
     let ssid_clone = ssid.to_string();
     let password_entry_clone = password_entry.clone();
     let status_reveal = status.clone();
+    let status_reveal_container = status_container.clone();
     reveal_button.connect_clicked(move |button| {
         if reveal_state_clone.get() {
             password_entry_clone.set_text("");
@@ -1252,6 +1586,7 @@ fn show_network_details_dialog(
             }
             Err(err) => {
                 let message = password_error_message(&err);
+                status_reveal_container.show_dialog_error(message.clone());
                 status_reveal(StatusKind::Error, message);
             }
         }
@@ -1351,6 +1686,7 @@ fn show_network_details_dialog(
     let dialog_forget = dialog.clone();
     let parent_forget = parent.clone();
     let ui_tx_forget = ui_tx.clone();
+    let failed_forget_ref = failed_connects.clone();
     forget_button.connect_clicked(move |_| {
         let confirm = MessageDialog::builder()
             .transient_for(&parent_forget)
@@ -1371,6 +1707,7 @@ fn show_network_details_dialog(
         let status_container_confirm = status_container_forget.clone();
         let dialog_close = dialog_forget.clone();
         let ui_tx_confirm = ui_tx_forget.clone();
+        let failed_confirm = failed_forget_ref.clone();
         confirm.connect_response(move |dialog, response| {
             if response == ResponseType::Accept {
                 match backend_confirm.forget_network(&ssid_confirm) {
@@ -1378,6 +1715,7 @@ fn show_network_details_dialog(
                         status_confirm(StatusKind::Success, "Network forgotten".to_string());
                         status_container_confirm.clear_dialog_label();
                         dialog_close.close();
+                        failed_confirm.borrow_mut().remove(&ssid_confirm);
                         request_state_refresh(&ui_tx_confirm);
                     }
                     Err(err) => {
@@ -1452,6 +1790,8 @@ fn prompt_connect_dialog(
     header: &Rc<HeaderWidgets>,
     ui_tx: &mpsc::Sender<UiEvent>,
     status_container: &Rc<StatusContainer>,
+    was_saved: bool,
+    initial_error: Option<String>,
 ) {
     let ssid = ssid.to_string();
     let ssid_label = ssid.clone();
@@ -1463,10 +1803,17 @@ fn prompt_connect_dialog(
     show_password_dialog(
         parent,
         &ssid_label,
+        initial_error,
         move |password| {
             loading.start();
             update_loading_ui(header.as_ref(), &loading);
-            spawn_connect_task(&ui_tx, ssid_connect.clone(), password.clone(), password.is_some());
+            spawn_connect_task(
+                &ui_tx,
+                ssid_connect.clone(),
+                password.clone(),
+                password.is_some(),
+                was_saved,
+            );
         },
         status_container,
     );
@@ -1475,6 +1822,7 @@ fn prompt_connect_dialog(
 fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     parent: &ApplicationWindow,
     ssid: &str,
+    initial_error: Option<String>,
     on_submit: F,
     status_container: StatusContainer,
 ) {
@@ -1491,19 +1839,16 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     box_.set_margin_start(12);
     box_.set_margin_end(12);
 
-    let error_label = Label::new(None);
-    error_label.add_css_class("yufi-dialog-error");
-    error_label.set_halign(Align::Start);
-    error_label.set_visible(false);
-    status_container.register_dialog_label(&error_label);
-
     let label = Label::new(Some(&format!("Password for {ssid}")));
     label.set_halign(Align::Start);
     let entry = Entry::new();
     entry.set_visibility(false);
     entry.set_placeholder_text(Some("Optional (leave empty for open network)"));
+    entry.add_css_class("yufi-entry");
+    if initial_error.is_some() {
+        entry.add_css_class("yufi-entry-error");
+    }
 
-    box_.append(&error_label);
     box_.append(&label);
     box_.append(&entry);
 
@@ -1525,12 +1870,12 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     box_.append(&actions);
     content.append(&box_);
     dialog.set_default_widget(Some(&connect_button));
+    let connect_activate = connect_button.clone();
+    entry.connect_activate(move |_| {
+        connect_activate.emit_clicked();
+    });
 
     let entry_clone = entry.clone();
-    let error_label_clone = error_label.clone();
-    entry.connect_changed(move |_| {
-        error_label_clone.set_visible(false);
-    });
 
     let dialog_connect = dialog.clone();
     let status_connect = status_container.clone();
@@ -1571,7 +1916,8 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     let error_label = Label::new(None);
     error_label.add_css_class("yufi-dialog-error");
     error_label.set_halign(Align::Start);
-    error_label.set_visible(false);
+    error_label.set_text("");
+    error_label.set_visible(true);
     status_container.register_dialog_label(&error_label);
 
     let ssid_label = Label::new(Some("Network Name (SSID)"));
@@ -1699,6 +2045,10 @@ fn load_css() {
         opacity: 0.65;
     }
 
+    .yufi-network-lock-open {
+        opacity: 0.35;
+    }
+
     .yufi-primary {
         border-radius: 10px;
         padding: 6px 10px;
@@ -1728,7 +2078,17 @@ fn load_css() {
     .yufi-dialog-error {
         color: @error_color;
         font-size: 12px;
+        min-height: 16px;
     }
+
+    .yufi-entry-error {
+        box-shadow: 0 0 0 1px @error_color;
+    }
+
+    .yufi-row-error {
+        border: 1px solid @error_color;
+    }
+
 
     .yufi-footer {
         border-radius: 12px;
