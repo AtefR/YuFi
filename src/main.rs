@@ -148,6 +148,7 @@ fn build_ui(app: &Application) {
     let header_rx = header_ref.clone();
     let refresh_button_rx = header.refresh.clone();
     let spinner_rx = header.spinner.clone();
+    let _refresh_slot_rx = header.refresh_slot.clone();
     let mock_rx = mock_backend.clone();
     let window_rx = window.clone();
     let ui_tx_rx = ui_tx.clone();
@@ -183,11 +184,11 @@ fn build_ui(app: &Application) {
                 UiEvent::ScanDone(result) => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
-                spinner_rx.stop();
-                spinner_rx.set_visible(false);
-                refresh_button_rx.set_sensitive(true);
-                refresh_button_rx.set_visible(true);
-                match result {
+                    spinner_rx.stop();
+                    spinner_rx.set_visible(false);
+                    refresh_button_rx.set_sensitive(true);
+                    refresh_button_rx.set_visible(true);
+                    match result {
                         Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
                         Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
                     }
@@ -307,6 +308,7 @@ struct HeaderWidgets {
     toggle: Switch,
     refresh: Button,
     spinner: Spinner,
+    refresh_slot: GtkBox,
 }
 
 #[derive(Clone)]
@@ -353,11 +355,17 @@ fn build_header(state: &AppState) -> HeaderWidgets {
     spinner.set_visible(false);
     spinner.add_css_class("yufi-spinner");
 
+    let refresh_slot = GtkBox::new(Orientation::Horizontal, 0);
+    refresh_slot.add_css_class("yufi-refresh-slot");
+    refresh_slot.set_halign(Align::Center);
+    refresh_slot.set_size_request(36, -1);
+    refresh_slot.append(&refresh);
+    refresh_slot.append(&spinner);
+
     let toggle = Switch::builder().active(state.wifi_enabled).build();
 
     header.append(&title);
-    header.append(&refresh);
-    header.append(&spinner);
+    header.append(&refresh_slot);
     header.append(&toggle);
 
     HeaderWidgets {
@@ -365,6 +373,7 @@ fn build_header(state: &AppState) -> HeaderWidgets {
         toggle,
         refresh,
         spinner,
+        refresh_slot,
     }
 }
 
@@ -526,6 +535,7 @@ fn wire_actions(
     let status_refresh = status.clone();
     let spinner_refresh = header_ref.spinner.clone();
     let refresh_button = header_ref.refresh.clone();
+    let refresh_slot = header_ref.refresh_slot.clone();
     let loading_refresh = loading.clone();
     let header_refresh = header_ref.clone();
     let ui_tx_refresh = ui_tx.clone();
@@ -536,6 +546,7 @@ fn wire_actions(
         spinner_refresh.start();
         refresh_button.set_visible(false);
         refresh_button.set_sensitive(false);
+        refresh_slot.set_halign(Align::Center);
         status_refresh(StatusKind::Info, "Scan requested".to_string());
         spawn_scan_task(&ui_tx_refresh);
     });
@@ -1337,6 +1348,10 @@ fn load_css() {
 
     .yufi-spinner {
         margin-right: 2px;
+    }
+
+    .yufi-refresh-slot {
+        min-width: 36px;
     }
     "#;
 
