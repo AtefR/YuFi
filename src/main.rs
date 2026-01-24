@@ -104,22 +104,59 @@ fn build_ui(app: &Application) {
                 let handler_ref = handler_ref.clone();
                 let ssid_clone = ssid.clone();
                 let status_action = status_action.clone();
-                show_password_dialog(&window_ref, &ssid, move |password| {
-                    match nm_action.connect_network(&ssid_clone, password.as_deref()) {
-                        Ok(_) => status_action(StatusKind::Success, format!("Connected to {ssid_clone}")),
-                        Err(err) => {
+
+                match nm_action.connect_network(&ssid_clone, None) {
+                    Ok(_) => {
+                        status_action(StatusKind::Success, format!("Connected to {ssid_clone}"));
+                        refresh_ui(
+                            &list_action,
+                            &toggle_action,
+                            &nm_action,
+                            &mock_action,
+                            &guard_action,
+                            &handler_ref,
+                        );
+                    }
+                    Err(err) => {
+                        if needs_password(&err) {
+                            let nm_action = nm_action.clone();
+                            let list_action = list_action.clone();
+                            let toggle_action = toggle_action.clone();
+                            let mock_action = mock_action.clone();
+                            let guard_action = guard_action.clone();
+                            let handler_ref = handler_ref.clone();
+                            let status_action = status_action.clone();
+                            show_password_dialog(&window_ref, &ssid, move |password| {
+                                let Some(password) = password else {
+                                    status_action(StatusKind::Info, "Password required".to_string());
+                                    return;
+                                };
+                                match nm_action.connect_network(&ssid_clone, Some(&password)) {
+                                    Ok(_) => status_action(
+                                        StatusKind::Success,
+                                        format!("Connected to {ssid_clone}"),
+                                    ),
+                                    Err(err) => {
+                                        status_action(
+                                            StatusKind::Error,
+                                            format!("Connect failed: {err:?}"),
+                                        );
+                                    }
+                                }
+                                refresh_ui(
+                                    &list_action,
+                                    &toggle_action,
+                                    &nm_action,
+                                    &mock_action,
+                                    &guard_action,
+                                    &handler_ref,
+                                );
+                            });
+                        } else {
                             status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
                         }
                     }
-                    refresh_ui(
-                        &list_action,
-                        &toggle_action,
-                        &nm_action,
-                        &mock_action,
-                        &guard_action,
-                        &handler_ref,
-                    );
-                });
+                }
             }
             RowAction::Disconnect(ssid) => {
                 match nm_action.disconnect_network(&ssid) {
@@ -456,6 +493,20 @@ fn show_status(label: &Label, kind: StatusKind, text: &str) {
         label.set_visible(false);
         ControlFlow::Break
     });
+}
+
+fn needs_password(err: &BackendError) -> bool {
+    match err {
+        BackendError::Unavailable(message) => {
+            let msg = message.to_lowercase();
+            msg.contains("secrets")
+                || msg.contains("password")
+                || msg.contains("psk")
+                || msg.contains("wireless-security")
+        }
+        BackendError::PermissionDenied => true,
+        BackendError::NotImplemented => false,
+    }
 }
 
 fn parse_ip_input<'a>(ip: &'a str, prefix: &'a str) -> (Option<&'a str>, Option<u32>) {
