@@ -668,29 +668,129 @@ fn needs_password(err: &BackendError) -> bool {
     }
 }
 
-fn parse_ip_input<'a>(ip: &'a str, prefix: &'a str) -> (Option<&'a str>, Option<u32>) {
-    let ip = ip.trim();
-    if ip.is_empty() {
-        return (None, None);
-    }
+struct ParsedNetworkInput {
+    ip: Option<String>,
+    prefix: Option<u32>,
+    gateway: Option<String>,
+    dns: Option<Vec<String>>,
+}
 
-    if !prefix.trim().is_empty() {
-        let prefix = prefix.trim().parse::<u32>().ok();
-        return (Some(ip), prefix.or(Some(24)));
-    }
+fn parse_network_inputs(
+    ip_text: &str,
+    prefix_text: &str,
+    gateway_text: &str,
+    dns_text: &str,
+) -> Result<ParsedNetworkInput, String> {
+    let ip_text = ip_text.trim();
+    let prefix_text = prefix_text.trim();
+    let gateway_text = gateway_text.trim();
+    let dns_text = dns_text.trim();
 
-    if let Some((addr, pre)) = ip.split_once('/') {
-        if let Ok(prefix) = pre.trim().parse::<u32>() {
+    let mut ip = None;
+    let mut prefix = None;
+
+    if !ip_text.is_empty() {
+        if let Some((addr, pre)) = ip_text.split_once('/') {
             let addr = addr.trim();
-            return if addr.is_empty() {
-                (None, Some(prefix))
+            let pre = pre.trim();
+            if addr.is_empty() {
+                return Err("IP address is required".to_string());
+            }
+            if !is_ipv4(addr) {
+                return Err("Invalid IP address".to_string());
+            }
+            ip = Some(addr.to_string());
+            if prefix_text.is_empty() {
+                prefix = Some(parse_prefix(pre)?);
             } else {
-                (Some(addr), Some(prefix))
-            };
+                prefix = Some(parse_prefix(prefix_text)?);
+            }
+        } else {
+            if !is_ipv4(ip_text) {
+                return Err("Invalid IP address".to_string());
+            }
+            ip = Some(ip_text.to_string());
+            if !prefix_text.is_empty() {
+                prefix = Some(parse_prefix(prefix_text)?);
+            }
+        }
+    } else if !prefix_text.is_empty() {
+        return Err("Prefix requires an IP address".to_string());
+    }
+
+    let gateway = if gateway_text.is_empty() {
+        None
+    } else {
+        if !is_ip_or_ipv6(gateway_text) {
+            return Err("Invalid gateway address".to_string());
+        }
+        if ip.is_none() {
+            return Err("Gateway requires an IP address".to_string());
+        }
+        Some(gateway_text.to_string())
+    };
+
+    let dns = if dns_text.is_empty() {
+        None
+    } else {
+        let mut list = Vec::new();
+        for entry in dns_text.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if !is_ip_or_ipv6(entry) {
+                return Err(format!("Invalid DNS server: {entry}"));
+            }
+            list.push(entry.to_string());
+        }
+        if list.is_empty() {
+            None
+        } else {
+            Some(list)
+        }
+    };
+
+    Ok(ParsedNetworkInput {
+        ip,
+        prefix,
+        gateway,
+        dns,
+    })
+}
+
+fn parse_prefix(input: &str) -> Result<u32, String> {
+    let prefix = input
+        .parse::<u32>()
+        .map_err(|_| "Invalid prefix (0-32)".to_string())?;
+    if prefix > 32 {
+        return Err("Invalid prefix (0-32)".to_string());
+    }
+    Ok(prefix)
+}
+
+fn is_ipv4(input: &str) -> bool {
+    let parts: Vec<&str> = input.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    for part in parts {
+        if part.is_empty() || part.len() > 3 {
+            return false;
+        }
+        if part.parse::<u8>().is_err() {
+            return false;
         }
     }
+    true
+}
 
-    (Some(ip), Some(24))
+fn is_ip_or_ipv6(input: &str) -> bool {
+    if is_ipv4(input) {
+        return true;
+    }
+    // Allow basic IPv6 literals without strict validation.
+    input.contains(':')
 }
 
 fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
@@ -845,6 +945,7 @@ fn show_network_details_dialog(
     let auto_switch = auto_switch.clone();
     let ssid = ssid.to_string();
     let status_save = status.clone();
+    let status_container = status_container.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
             let ip_text = ip_entry.text().to_string();
@@ -852,22 +953,27 @@ fn show_network_details_dialog(
             let gateway_text = gateway_entry.text().to_string();
             let dns_text = dns_entry.text().to_string();
 
-            let (ip_opt, prefix_opt) = parse_ip_input(&ip_text, &prefix_text);
-            let gateway_opt = if gateway_text.is_empty() {
-                None
-            } else {
-                Some(gateway_text.as_str())
+            let parsed = match parse_network_inputs(
+                &ip_text,
+                &prefix_text,
+                &gateway_text,
+                &dns_text,
+            ) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    status_container.show_dialog_error(message);
+                    return;
+                }
             };
 
-            let dns_list = dns_text
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>();
-            let dns_opt = if dns_list.is_empty() { None } else { Some(dns_list) };
-
             let mut failed = false;
-            if let Err(err) = backend.set_ip_dns(&ssid, ip_opt, prefix_opt, gateway_opt, dns_opt) {
+            if let Err(err) = backend.set_ip_dns(
+                &ssid,
+                parsed.ip.as_deref(),
+                parsed.prefix,
+                parsed.gateway.as_deref(),
+                parsed.dns,
+            ) {
                 failed = true;
                 status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
             }
@@ -878,9 +984,12 @@ fn show_network_details_dialog(
             if !failed {
                 status_save(StatusKind::Success, "Saved network settings".to_string());
             }
+            status_container.clear_dialog_label();
+            dialog.close();
+        } else {
+            status_container.clear_dialog_label();
+            dialog.close();
         }
-        status_container.clear_dialog_label();
-        dialog.close();
     });
     dialog.show();
 }
@@ -926,14 +1035,25 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     content.append(&box_);
 
     let entry_clone = entry.clone();
+    let error_label_clone = error_label.clone();
+    entry.connect_changed(move |_| {
+        error_label_clone.set_visible(false);
+    });
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
             let text = entry_clone.text().to_string();
-            let value = if text.is_empty() { None } else { Some(text) };
-            on_submit(value);
+            if text.is_empty() {
+                error_label.set_text("Password is required");
+                error_label.set_visible(true);
+                return;
+            }
+            on_submit(Some(text));
+            status_container.clear_dialog_label();
+            dialog.close();
+        } else {
+            status_container.clear_dialog_label();
+            dialog.close();
         }
-        status_container.clear_dialog_label();
-        dialog.close();
     });
     dialog.show();
 }
@@ -987,17 +1107,27 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
 
     let ssid_entry = ssid_entry.clone();
     let pass_entry = pass_entry.clone();
+    let error_label_clone = error_label.clone();
+    ssid_entry.connect_changed(move |_| {
+        error_label_clone.set_visible(false);
+    });
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
             let ssid = ssid_entry.text().to_string();
-            if !ssid.is_empty() {
-                let password = pass_entry.text().to_string();
-                let pw = if password.is_empty() { None } else { Some(password) };
-                on_submit(ssid, pw);
+            if ssid.trim().is_empty() {
+                error_label.set_text("SSID is required");
+                error_label.set_visible(true);
+                return;
             }
+            let password = pass_entry.text().to_string();
+            let pw = if password.is_empty() { None } else { Some(password) };
+            on_submit(ssid, pw);
+            status_container.clear_dialog_label();
+            dialog.close();
+        } else {
+            status_container.clear_dialog_label();
+            dialog.close();
         }
-        status_container.clear_dialog_label();
-        dialog.close();
     });
     dialog.show();
 }
