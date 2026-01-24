@@ -252,15 +252,12 @@ fn build_ui(app: &Application) {
                         Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
                         Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
                     }
-                    let ui_tx = ui_tx_rx.clone();
-                    gtk4::glib::timeout_add_local(Duration::from_millis(2000), move || {
-                        request_state_refresh(&ui_tx);
-                        ControlFlow::Break
-                    });
+                    // Updates should arrive via D-Bus signals.
                 }
                 UiEvent::WifiSet { enabled, result } => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    let is_err = result.is_err();
                     match result {
                         Ok(_) => {
                             let label = if enabled { "Wi‑Fi enabled" } else { "Wi‑Fi disabled" };
@@ -270,7 +267,9 @@ fn build_ui(app: &Application) {
                             status_rx(StatusKind::Error, format!("Failed to set Wi‑Fi: {err:?}"));
                         }
                     }
-                    request_state_refresh(&ui_tx_rx);
+                    if is_err {
+                        request_state_refresh(&ui_tx_rx);
+                    }
                 }
                 UiEvent::ConnectDone { ssid, result, from_password } => {
                     loading_rx.stop();
@@ -279,13 +278,8 @@ fn build_ui(app: &Application) {
                         Ok(_) => {
                             *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
                             status_rx(StatusKind::Success, format!("Connected to {ssid}"));
-                            request_state_refresh(&ui_tx_rx);
-                            let ui_tx = ui_tx_rx.clone();
-                            gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                                request_state_refresh(&ui_tx);
-                                ControlFlow::Break
-                            });
-                        }
+                        // Updates should arrive via D-Bus signals.
+                    }
                         Err(err) => {
                             *optimistic_active_rx.borrow_mut() = None;
                             if !from_password && needs_password(&err) {
@@ -326,13 +320,8 @@ fn build_ui(app: &Application) {
                     Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
                 }
                 *optimistic_active_rx.borrow_mut() = None;
-                request_state_refresh(&ui_tx_rx);
-                    let ui_tx = ui_tx_rx.clone();
-                    gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                        request_state_refresh(&ui_tx);
-                        ControlFlow::Break
-                    });
-                }
+                // Updates should arrive via D-Bus signals.
+            }
                 UiEvent::HiddenDone { ssid, result } => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
@@ -345,13 +334,8 @@ fn build_ui(app: &Application) {
                         status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
                     }
                 }
-                request_state_refresh(&ui_tx_rx);
-                    let ui_tx = ui_tx_rx.clone();
-                    gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                        request_state_refresh(&ui_tx);
-                        ControlFlow::Break
-                    });
-                }
+                // Updates should arrive via D-Bus signals.
+            }
                 UiEvent::RefreshRequested => {
                     if refresh_guard_rx.get() {
                         continue;
@@ -515,9 +499,17 @@ fn build_network_row(
 
     let icon = Image::from_icon_name(network.signal_icon);
     icon.add_css_class("yufi-network-icon");
+    let icon_row = GtkBox::new(Orientation::Horizontal, 6);
+    icon_row.set_halign(Align::End);
+    if network.is_secure {
+        let lock = Image::from_icon_name("changes-prevent-symbolic");
+        lock.add_css_class("yufi-network-lock");
+        icon_row.append(&lock);
+    }
+    icon_row.append(&icon);
 
     top.append(&label);
-    top.append(&icon);
+    top.append(&icon_row);
 
     container.append(&top);
 
@@ -1708,6 +1700,10 @@ fn load_css() {
 
     .yufi-network-name {
         font-weight: 600;
+    }
+
+    .yufi-network-lock {
+        opacity: 0.65;
     }
 
     .yufi-primary {

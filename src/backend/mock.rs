@@ -19,6 +19,7 @@ impl MockBackend {
                     strength: 90,
                     is_active: true,
                     is_saved: true,
+                    is_secure: true,
                 },
                 Network {
                     ssid: "Office_Main".to_string(),
@@ -27,6 +28,7 @@ impl MockBackend {
                     strength: 60,
                     is_active: false,
                     is_saved: true,
+                    is_secure: true,
                 },
                 Network {
                     ssid: "Coffee_Shop_Free".to_string(),
@@ -35,6 +37,7 @@ impl MockBackend {
                     strength: 55,
                     is_active: false,
                     is_saved: false,
+                    is_secure: false,
                 },
                 Network {
                     ssid: "Guest_Network".to_string(),
@@ -43,6 +46,7 @@ impl MockBackend {
                     strength: 48,
                     is_active: false,
                     is_saved: false,
+                    is_secure: true,
                 },
                 Network {
                     ssid: "Linksys_502".to_string(),
@@ -51,6 +55,7 @@ impl MockBackend {
                     strength: 15,
                     is_active: false,
                     is_saved: false,
+                    is_secure: false,
                 },
             ],
         }

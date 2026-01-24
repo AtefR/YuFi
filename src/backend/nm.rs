@@ -37,7 +37,7 @@ impl Backend for NetworkManagerBackend {
             .call("GetAccessPoints", &())
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-        let mut best_by_ssid: HashMap<String, (u8, bool, &'static str)> = HashMap::new();
+        let mut best_by_ssid: HashMap<String, (u8, bool, &'static str, bool)> = HashMap::new();
 
         for ap_path in ap_paths {
             let ap_proxy = ap_proxy(&conn, &ap_path)?;
@@ -52,6 +52,7 @@ impl Backend for NetworkManagerBackend {
             let strength: u8 = ap_proxy
                 .get_property("Strength")
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            let is_secure = ap_is_secure(&ap_proxy)?;
 
             let is_active = if let Some(active_ap) = active_specific_ap.as_ref() {
                 ap_path == *active_ap
@@ -63,34 +64,35 @@ impl Backend for NetworkManagerBackend {
             let icon = icon_for_strength(strength);
 
             match best_by_ssid.get(&ssid) {
-                Some((best_strength, best_active, _)) => {
-                    if is_active && !best_active || strength > *best_strength {
-                        best_by_ssid.insert(ssid, (strength, is_active, icon));
+                Some((best_strength, best_active, _best_icon, _best_secure)) => {
+                    if (is_active && !best_active) || strength > *best_strength {
+                        best_by_ssid.insert(ssid, (strength, is_active, icon, is_secure));
                     }
                 }
                 None => {
-                    best_by_ssid.insert(ssid, (strength, is_active, icon));
+                    best_by_ssid.insert(ssid, (strength, is_active, icon, is_secure));
                 }
             }
         }
 
         let mut networks: Vec<Network> = best_by_ssid
             .into_iter()
-            .map(|(ssid, (strength, is_active, icon))| {
+            .map(|(ssid, (strength, is_active, icon, is_secure))| {
                 let is_saved = saved_ssids.contains(&ssid);
                 Network {
-                ssid,
-                signal_icon: icon,
-                action: if !wifi_enabled {
+                    ssid,
+                    signal_icon: icon,
+                    action: if !wifi_enabled {
                     NetworkAction::None
                 } else if is_active {
                     NetworkAction::Disconnect
                 } else {
                     NetworkAction::Connect
-                },
-                strength,
-                is_active,
-                is_saved,
+                    },
+                    strength,
+                    is_active,
+                    is_saved,
+                    is_secure,
             }})
             .collect();
 
@@ -430,6 +432,21 @@ fn wireless_proxy<'a>(
 fn ap_proxy<'a>(conn: &'a Connection, path: &'a OwnedObjectPath) -> BackendResult<Proxy<'a>> {
     Proxy::new(conn, nm_consts::BUS_NAME, path.as_str(), nm_consts::AP_INTERFACE)
         .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn ap_is_secure(ap: &Proxy<'_>) -> BackendResult<bool> {
+    let flags: u32 = ap
+        .get_property("Flags")
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    let wpa_flags: u32 = ap
+        .get_property("WpaFlags")
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    let rsn_flags: u32 = ap
+        .get_property("RsnFlags")
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    let privacy = flags & 0x1 != 0;
+    Ok(privacy || wpa_flags != 0 || rsn_flags != 0)
 }
 
 fn nm_settings_proxy(conn: &Connection) -> BackendResult<Proxy<'_>> {

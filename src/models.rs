@@ -13,6 +13,7 @@ pub struct Network {
     pub strength: u8,
     pub is_active: bool,
     pub is_saved: bool,
+    pub is_secure: bool,
 }
 
 #[derive(Clone, Debug)]
