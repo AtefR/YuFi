@@ -67,6 +67,7 @@ fn build_ui(app: &Application) {
     let header_ref = Rc::new(header.clone());
     let search = build_search();
     let list = build_network_list();
+    let legend = build_lock_legend();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
     let pending_connect = Rc::new(RefCell::new(None::<PendingConnect>));
@@ -100,6 +101,7 @@ fn build_ui(app: &Application) {
     panel.append(&search);
     panel.append(&status_bar);
     panel.append(&list);
+    panel.append(&legend);
     panel.append(&spacer);
     panel.append(&hidden);
 
@@ -687,6 +689,11 @@ fn build_network_row(
     icon.add_css_class("yufi-network-icon");
     let icon_row = GtkBox::new(Orientation::Horizontal, 6);
     icon_row.set_halign(Align::End);
+    if network.is_saved {
+        let saved_dot = GtkBox::new(Orientation::Horizontal, 0);
+        saved_dot.add_css_class("yufi-saved-dot");
+        icon_row.append(&saved_dot);
+    }
     let lock_icon = if network.is_secure {
         "changes-prevent-symbolic"
     } else {
@@ -714,6 +721,7 @@ fn build_network_row(
                 loading.set_halign(Align::Center);
                 let spinner = Spinner::new();
                 spinner.start();
+                spinner.set_tooltip_text(Some("Connecting…"));
                 loading.append(&spinner);
                 container.append(&loading);
             } else {
@@ -762,6 +770,29 @@ fn build_hidden_button() -> Button {
     hidden.add_css_class("yufi-footer");
     hidden.add_css_class("yufi-secondary");
     hidden
+}
+
+fn build_lock_legend() -> GtkBox {
+    let legend = GtkBox::new(Orientation::Horizontal, 6);
+    legend.add_css_class("yufi-legend");
+    legend.set_halign(Align::Start);
+
+    let secure_icon = Image::from_icon_name("changes-prevent-symbolic");
+    secure_icon.add_css_class("yufi-network-lock");
+    let secure_label = Label::new(Some("Secure"));
+    secure_label.add_css_class("yufi-legend-label");
+
+    let open_icon = Image::from_icon_name("changes-allow-symbolic");
+    open_icon.add_css_class("yufi-network-lock-open");
+    let open_label = Label::new(Some("Open"));
+    open_label.add_css_class("yufi-legend-label");
+
+    legend.append(&secure_icon);
+    legend.append(&secure_label);
+    legend.append(&open_icon);
+    legend.append(&open_label);
+
+    legend
 }
 
 fn effective_action_for(
@@ -1472,6 +1503,12 @@ fn parse_network_inputs(
     })
 }
 
+fn set_manual_fields_enabled(ip: &Entry, gateway: &Entry, dns: &Entry, enabled: bool) {
+    ip.set_sensitive(enabled);
+    gateway.set_sensitive(enabled);
+    dns.set_sensitive(enabled);
+}
+
 fn parse_prefix(input: &str) -> Result<u32, String> {
     let prefix = input
         .parse::<u32>()
@@ -1617,6 +1654,14 @@ fn show_network_details_dialog(
     let dns_entry = Entry::new();
     dns_entry.set_placeholder_text(Some("e.g. 1.1.1.1, 8.8.8.8"));
 
+    let dhcp_row = GtkBox::new(Orientation::Horizontal, 8);
+    let dhcp_label = Label::new(Some("Use DHCP"));
+    dhcp_label.set_halign(Align::Start);
+    dhcp_label.set_hexpand(true);
+    let dhcp_switch = Switch::builder().active(true).build();
+    dhcp_row.append(&dhcp_label);
+    dhcp_row.append(&dhcp_switch);
+
     let auto_row = GtkBox::new(Orientation::Horizontal, 8);
     let auto_label = Label::new(Some("Auto‑reconnect"));
     auto_label.set_halign(Align::Start);
@@ -1629,6 +1674,7 @@ fn show_network_details_dialog(
     box_.append(&title);
     box_.append(&password_label);
     box_.append(&password_row);
+    box_.append(&dhcp_row);
     box_.append(&ip_label);
     box_.append(&ip_entry);
     box_.append(&gateway_label);
@@ -1673,15 +1719,21 @@ fn show_network_details_dialog(
         .get_network_details(ssid)
         .unwrap_or_else(|_| NetworkDetails::default());
 
+    let mut has_manual = false;
     if let Some(ip) = details.ip_address {
         ip_entry.set_text(&ip);
+        has_manual = true;
     }
     if let Some(gateway) = details.gateway {
         gateway_entry.set_text(&gateway);
+        has_manual = true;
     }
     if !details.dns_servers.is_empty() {
         dns_entry.set_text(&details.dns_servers.join(", "));
+        has_manual = true;
     }
+    dhcp_switch.set_active(!has_manual);
+    set_manual_fields_enabled(&ip_entry, &gateway_entry, &dns_entry, !dhcp_switch.is_active());
     if let Some(auto) = details.auto_reconnect {
         auto_switch.set_active(auto);
     }
@@ -1738,6 +1790,18 @@ fn show_network_details_dialog(
     let ip_entry = ip_entry.clone();
     let gateway_entry = gateway_entry.clone();
     let dns_entry = dns_entry.clone();
+    let dhcp_switch_clone = dhcp_switch.clone();
+    let ip_toggle = ip_entry.clone();
+    let gateway_toggle = gateway_entry.clone();
+    let dns_toggle = dns_entry.clone();
+    dhcp_switch.connect_state_set(move |_switch, state| {
+        set_manual_fields_enabled(&ip_toggle, &gateway_toggle, &dns_toggle, !state);
+        Propagation::Proceed
+    });
+
+    let ip_entry = ip_entry.clone();
+    let gateway_entry = gateway_entry.clone();
+    let dns_entry = dns_entry.clone();
     let auto_switch = auto_switch.clone();
     let ssid = ssid.to_string();
     let status_save = status.clone();
@@ -1759,12 +1823,16 @@ fn show_network_details_dialog(
         };
 
         let mut failed = false;
+        let use_manual = !dhcp_switch_clone.is_active();
+        let ip = if use_manual { parsed.ip.as_deref() } else { None };
+        let gateway = if use_manual { parsed.gateway.as_deref() } else { None };
+        let dns = if use_manual { parsed.dns } else { None };
         if let Err(err) = backend_save.set_ip_dns(
             &ssid,
-            parsed.ip.as_deref(),
+            ip,
             parsed.prefix,
-            parsed.gateway.as_deref(),
-            parsed.dns,
+            gateway,
+            dns,
         ) {
             failed = true;
             status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
@@ -1855,6 +1923,8 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     if initial_error.is_some() {
         entry.add_css_class("yufi-entry-error");
     }
+    entry.grab_focus();
+    entry.select_region(0, -1);
 
     box_.append(&label);
     box_.append(&entry);
@@ -2054,6 +2124,24 @@ fn load_css() {
 
     .yufi-network-lock-open {
         opacity: 0.35;
+    }
+
+    .yufi-legend {
+        margin-top: 4px;
+        padding: 4px 6px;
+    }
+
+    .yufi-legend-label {
+        font-size: 11px;
+        color: @insensitive_fg_color;
+    }
+
+    .yufi-saved-dot {
+        min-width: 6px;
+        min-height: 6px;
+        border-radius: 999px;
+        background: @accent_color;
+        margin-right: 4px;
     }
 
     .yufi-primary {
