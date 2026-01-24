@@ -9,8 +9,8 @@ use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
-    Label, ListBox, ListBoxRow, MessageDialog, MessageType, Orientation, ResponseType, SearchEntry,
-    Spinner, Stack, Switch,
+    Label, ListBox, ListBoxRow, MessageDialog, MessageType, Orientation, Overlay, ResponseType,
+    SearchEntry, Spinner, Switch,
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
@@ -212,7 +212,7 @@ fn build_ui(app: &Application) {
     let header_rx = header_ref.clone();
     let refresh_button_rx = header.refresh.clone();
     let spinner_rx = header.spinner.clone();
-    let refresh_stack_rx = header.refresh_stack.clone();
+    let refresh_overlay_rx = header.refresh_overlay.clone();
     let window_rx = window.clone();
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
@@ -280,9 +280,12 @@ fn build_ui(app: &Application) {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
                     spinner_rx.stop();
-                    refresh_stack_rx.set_visible_child_name("refresh");
+                    spinner_rx.set_visible(false);
+                    refresh_overlay_rx.set_visible(true);
                     refresh_button_rx.set_sensitive(true);
-    match result {
+                    refresh_button_rx.set_visible(true);
+                    refresh_button_rx.set_opacity(1.0);
+                    match result {
         Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
         Err(err) => {
             status_rx(StatusKind::Error, format!("Scan failed: {}", friendly_error(&err)))
@@ -539,7 +542,7 @@ struct HeaderWidgets {
     toggle: Switch,
     refresh: Button,
     spinner: Spinner,
-    refresh_stack: Stack,
+    refresh_overlay: Overlay,
 }
 
 #[derive(Clone)]
@@ -584,20 +587,22 @@ fn build_header(state: &AppState) -> HeaderWidgets {
     refresh.add_css_class("flat");
 
     let spinner = Spinner::new();
+    spinner.set_visible(false);
     spinner.add_css_class("yufi-spinner");
+    spinner.set_halign(Align::Center);
+    spinner.set_valign(Align::Center);
 
-    let refresh_stack = Stack::new();
-    refresh_stack.add_css_class("yufi-refresh-slot");
-    refresh_stack.set_halign(Align::Center);
-    refresh_stack.set_size_request(36, -1);
-    refresh_stack.add_named(&refresh, Some("refresh"));
-    refresh_stack.add_named(&spinner, Some("spinner"));
-    refresh_stack.set_visible_child_name("refresh");
+    let refresh_overlay = Overlay::new();
+    refresh_overlay.add_css_class("yufi-refresh-slot");
+    refresh_overlay.set_halign(Align::Center);
+    refresh_overlay.set_size_request(36, -1);
+    refresh_overlay.set_child(Some(&refresh));
+    refresh_overlay.add_overlay(&spinner);
 
     let toggle = Switch::builder().active(state.wifi_enabled).build();
 
     header.append(&title);
-    header.append(&refresh_stack);
+    header.append(&refresh_overlay);
     header.append(&toggle);
 
     HeaderWidgets {
@@ -605,7 +610,7 @@ fn build_header(state: &AppState) -> HeaderWidgets {
         toggle,
         refresh,
         spinner,
-        refresh_stack,
+        refresh_overlay,
     }
 }
 
@@ -880,7 +885,7 @@ fn wire_actions(
     let status_refresh = status.clone();
     let spinner_refresh = header_ref.spinner.clone();
     let refresh_button = header_ref.refresh.clone();
-    let refresh_stack = header_ref.refresh_stack.clone();
+    let refresh_overlay = header_ref.refresh_overlay.clone();
     let loading_refresh = loading.clone();
     let header_refresh = header_ref.clone();
     let ui_tx_refresh = ui_tx.clone();
@@ -889,7 +894,9 @@ fn wire_actions(
         update_loading_ui(header_refresh.as_ref(), &loading_refresh);
         spinner_refresh.start();
         refresh_button.set_sensitive(false);
-        refresh_stack.set_visible_child_name("spinner");
+        refresh_overlay.set_visible(true);
+        refresh_button.set_opacity(0.0);
+        spinner_refresh.set_visible(true);
         status_refresh(StatusKind::Info, "Scan requested".to_string());
         spawn_scan_task(&ui_tx_refresh);
     });
@@ -2102,6 +2109,7 @@ fn load_css() {
 
     .yufi-spinner {
         margin-right: 2px;
+        background: transparent;
     }
 
     .yufi-refresh-slot {
