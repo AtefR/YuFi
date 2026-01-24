@@ -4,8 +4,24 @@ YuFi is a lightweight GTK4 Wi‑Fi manager for Linux, built in Rust. It focuses 
 minimal dashboard for quick toggles, scanning, and network management.
 
 ## Status
-Active development. UI and core NetworkManager integration are in place; some advanced features
-are still being refined.
+Stable 1.0.0 release. Ongoing maintenance and UX polish.
+
+## Install
+### Arch (AUR)
+```
+yay -S yufi
+```
+
+Binary release:
+```
+yay -S yufi-bin
+```
+
+### GitHub Releases (manual)
+Download the release tarball and extract it to `/` (it contains a `usr/` tree).
+```
+tar -xzf yufi-1.0.0-x86_64.tar.gz -C /
+```
 
 ## Features
 - Enable/disable Wi‑Fi device
@@ -20,8 +36,8 @@ are still being refined.
 Requires GTK4 development libraries and NetworkManager.
 
 ```
-cargo build
-cargo run
+cargo build --release
+./target/release/yufi
 ```
 
 ## Permissions
@@ -34,9 +50,12 @@ allow active local users to manage Wi‑Fi without repeated prompts. Review it b
 Flatpak builds already request system‑bus access in `packaging/com.yufi.app.yml`, but permissions
 still depend on host polkit policy.
 
-## Packaging (draft)
-- Desktop entry: `com.yufi.app.desktop`
-- Icon: `com.yufi.app.svg`
+## Packaging
+- AUR source: `packaging/aur/yufi`
+- AUR binary: `packaging/aur/yufi-bin`
+- Release script: `packaging/release.sh`
+- Desktop entry: `packaging/com.yufi.app.desktop`
+- Icon: `packaging/com.yufi.app.svg`
 - Flatpak: `packaging/com.yufi.app.yml`
 - AppImage: optional for portable builds
 
