@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=YuFi
+Comment=Lightweight Wi‑Fi manager
+Exec=yufi
+Icon=com.yufi.app
+Terminal=false
+Categories=Network;System;Utility;
+StartupNotify=true
