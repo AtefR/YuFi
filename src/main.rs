@@ -565,7 +565,7 @@ fn build_network_row(
 fn build_hidden_button() -> Button {
     let hidden = Button::with_label("Connect to Hidden Network...");
     hidden.add_css_class("yufi-footer");
-    hidden.add_css_class("flat");
+    hidden.add_css_class("yufi-secondary");
     hidden
 }
 
@@ -1320,14 +1320,20 @@ fn show_network_details_dialog(
     let cancel_button = Button::with_label("Cancel");
     cancel_button.set_hexpand(true);
     cancel_button.set_halign(Align::Fill);
+    cancel_button.add_css_class("yufi-secondary");
 
     let forget_button = Button::with_label("Forget Network");
     forget_button.add_css_class("destructive-action");
+    forget_button.add_css_class("yufi-secondary");
     forget_button.set_hexpand(true);
     forget_button.set_halign(Align::Fill);
 
-    actions.append(&save_button);
-    actions.append(&cancel_button);
+    let save_row = GtkBox::new(Orientation::Horizontal, 8);
+    save_row.set_hexpand(true);
+    save_row.append(&cancel_button);
+    save_row.append(&save_button);
+
+    actions.append(&save_row);
     actions.append(&forget_button);
 
     box_.append(&actions);
@@ -1394,7 +1400,7 @@ fn show_network_details_dialog(
             }
             dialog.close();
         });
-        confirm.show();
+        confirm.present();
     });
 
     let ip_entry = ip_entry.clone();
@@ -1449,7 +1455,7 @@ fn show_network_details_dialog(
         status_container_cancel.clear_dialog_label();
         dialog_cancel.close();
     });
-    dialog.show();
+    dialog.present();
 }
 
 fn prompt_connect_dialog(
@@ -1554,7 +1560,7 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
         status_container.clear_dialog_label();
         dialog_cancel.close();
     });
-    dialog.show();
+    dialog.present();
 }
 
 fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
@@ -1566,7 +1572,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     dialog.set_title(Some("Hidden Network"));
     dialog.set_transient_for(Some(parent));
     dialog.set_modal(true);
-    dialog.set_default_width(340);
+    dialog.set_default_width(380);
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 8);
@@ -1645,7 +1651,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
         status_container.clear_dialog_label();
         dialog_cancel.close();
     });
-    dialog.show();
+    dialog.present();
 }
 
 fn load_state_with_backend(
