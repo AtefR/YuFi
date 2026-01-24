@@ -60,6 +60,9 @@ fn build_ui(app: &Application) {
     let list = build_network_list();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     populate_network_list(&list, &state, &action_handler);
+    let status_container = Rc::new(StatusContainer {
+        dialog_label: Rc::new(RefCell::new(None)),
+    });
     let spacer = GtkBox::new(Orientation::Vertical, 0);
     spacer.set_vexpand(true);
     let hidden = build_hidden_button();
@@ -82,6 +85,7 @@ fn build_ui(app: &Application) {
         &action_handler,
         &window,
         &status_handler,
+        &status_container,
     );
 
     let list_action = list.clone();
@@ -92,6 +96,7 @@ fn build_ui(app: &Application) {
     let handler_ref = action_handler.clone();
     let window_ref = window.clone();
     let status_action = status_handler.clone();
+    let status_container_action = status_container.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
@@ -126,7 +131,10 @@ fn build_ui(app: &Application) {
                             let guard_action = guard_action.clone();
                             let handler_ref = handler_ref.clone();
                             let status_action = status_action.clone();
-                            show_password_dialog(&window_ref, &ssid, move |password| {
+                            show_password_dialog(
+                                &window_ref,
+                                &ssid,
+                                move |password| {
                                 let Some(password) = password else {
                                     status_action(StatusKind::Info, "Password required".to_string());
                                     return;
@@ -137,23 +145,23 @@ fn build_ui(app: &Application) {
                                         format!("Connected to {ssid_clone}"),
                                     ),
                                     Err(err) => {
-                                        status_action(
-                                            StatusKind::Error,
-                                            format!("Connect failed: {err:?}"),
-                                        );
+                                        status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
                                     }
                                 }
-                                refresh_ui(
-                                    &list_action,
-                                    &toggle_action,
-                                    &nm_action,
-                                    &mock_action,
-                                    &guard_action,
-                                    &handler_ref,
-                                );
-                            });
+                                    refresh_ui(
+                                        &list_action,
+                                        &toggle_action,
+                                        &nm_action,
+                                        &mock_action,
+                                        &guard_action,
+                                        &handler_ref,
+                                    );
+                                },
+                                (*status_container_action).clone(),
+                            );
                         } else {
                             status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
+                            status_container_action.show_dialog_error(format!("{err:?}"));
                         }
                     }
                 }
@@ -161,7 +169,10 @@ fn build_ui(app: &Application) {
             RowAction::Disconnect(ssid) => {
                 match nm_action.disconnect_network(&ssid) {
                     Ok(_) => status_action(StatusKind::Success, format!("Disconnected from {ssid}")),
-                    Err(err) => status_action(StatusKind::Error, format!("Disconnect failed: {err:?}")),
+                    Err(err) => {
+                        status_action(StatusKind::Error, format!("Disconnect failed: {err:?}"));
+                        status_container_action.show_dialog_error(format!("{err:?}"));
+                    }
                 }
                 refresh_ui(
                     &list_action,
@@ -183,6 +194,7 @@ fn build_ui(app: &Application) {
     let hidden_handler = action_handler.clone();
     let hidden_window = window.clone();
     let hidden_status = status_handler.clone();
+    let hidden_status_container = status_container.clone();
     hidden.connect_clicked(move |_| {
         let nm = hidden_nm.clone();
         let list = hidden_list.clone();
@@ -191,13 +203,22 @@ fn build_ui(app: &Application) {
         let guard = hidden_guard.clone();
         let handler = hidden_handler.clone();
         let status = hidden_status.clone();
-        show_hidden_network_dialog(&hidden_window, move |ssid, password| {
-            match nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
-                Ok(_) => status(StatusKind::Success, format!("Connected to {ssid}")),
-                Err(err) => status(StatusKind::Error, format!("Hidden connect failed: {err:?}")),
-            }
-            refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
-        });
+        let status_container = hidden_status_container.clone();
+        let status_container_for_dialog = (*status_container).clone();
+        show_hidden_network_dialog(
+            &hidden_window,
+            move |ssid, password| {
+                match nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
+                    Ok(_) => status(StatusKind::Success, format!("Connected to {ssid}")),
+                    Err(err) => {
+                        status(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
+                        status_container.show_dialog_error(format!("{err:?}"));
+                    }
+                }
+                refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
+            },
+            status_container_for_dialog,
+        );
     });
 
     window.set_child(Some(&root));
@@ -363,6 +384,7 @@ fn wire_actions(
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     parent: &ApplicationWindow,
     status: &StatusHandler,
+    status_container: &StatusContainer,
 ) {
     let list_refresh = list.clone();
     let toggle_refresh = header.toggle.clone();
@@ -448,6 +470,7 @@ fn wire_actions(
     let nm_details = nm_backend.clone();
     let window_details = parent.clone();
     let status_details = status.clone();
+    let status_details_container = status_container.clone();
     list.connect_row_activated(move |_list, row| {
         if let Some(ssid) = ssid_from_row(row) {
             show_network_details_dialog(
@@ -455,6 +478,7 @@ fn wire_actions(
                 &ssid,
                 nm_details.clone(),
                 status_details.clone(),
+                status_details_container.clone(),
             );
         }
     });
@@ -495,6 +519,28 @@ fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: Ro
     let handler = action_handler.borrow().clone();
     if let Some(handler) = handler {
         handler(action);
+    }
+}
+
+#[derive(Clone)]
+struct StatusContainer {
+    dialog_label: Rc<RefCell<Option<Label>>>,
+}
+
+impl StatusContainer {
+    fn register_dialog_label(&self, label: &Label) {
+        *self.dialog_label.borrow_mut() = Some(label.clone());
+    }
+
+    fn clear_dialog_label(&self) {
+        *self.dialog_label.borrow_mut() = None;
+    }
+
+    fn show_dialog_error(&self, text: String) {
+        if let Some(label) = self.dialog_label.borrow().clone() {
+            label.set_text(&text);
+            label.set_visible(true);
+        }
     }
 }
 
@@ -580,6 +626,7 @@ fn show_network_details_dialog(
     ssid: &str,
     backend: Rc<NetworkManagerBackend>,
     status: StatusHandler,
+    status_container: StatusContainer,
 ) {
     let dialog = Dialog::with_buttons(
         Some("Network Details"),
@@ -594,6 +641,12 @@ fn show_network_details_dialog(
     box_.set_margin_bottom(12);
     box_.set_margin_start(12);
     box_.set_margin_end(12);
+
+    let error_label = Label::new(None);
+    error_label.add_css_class("yufi-dialog-error");
+    error_label.set_halign(Align::Start);
+    error_label.set_visible(false);
+    status_container.register_dialog_label(&error_label);
 
     let title = Label::new(Some(ssid));
     title.set_halign(Align::Start);
@@ -672,6 +725,7 @@ fn show_network_details_dialog(
     auto_row.append(&auto_label);
     auto_row.append(&auto_switch);
 
+    box_.append(&error_label);
     box_.append(&title);
     box_.append(&password_label);
     box_.append(&password_row);
@@ -747,6 +801,7 @@ fn show_network_details_dialog(
                 status_save(StatusKind::Success, "Saved network settings".to_string());
             }
         }
+        status_container.clear_dialog_label();
         dialog.close();
     });
     dialog.show();
@@ -756,6 +811,7 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     parent: &ApplicationWindow,
     ssid: &str,
     on_submit: F,
+    status_container: StatusContainer,
 ) {
     let dialog = Dialog::with_buttons(
         Some("Connect to network"),
@@ -774,12 +830,19 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     box_.set_margin_start(12);
     box_.set_margin_end(12);
 
+    let error_label = Label::new(None);
+    error_label.add_css_class("yufi-dialog-error");
+    error_label.set_halign(Align::Start);
+    error_label.set_visible(false);
+    status_container.register_dialog_label(&error_label);
+
     let label = Label::new(Some(&format!("Password for {ssid}")));
     label.set_halign(Align::Start);
     let entry = Entry::new();
     entry.set_visibility(false);
     entry.set_placeholder_text(Some("Required"));
 
+    box_.append(&error_label);
     box_.append(&label);
     box_.append(&entry);
     content.append(&box_);
@@ -791,6 +854,7 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
             let value = if text.is_empty() { None } else { Some(text) };
             on_submit(value);
         }
+        status_container.clear_dialog_label();
         dialog.close();
     });
     dialog.show();
@@ -799,6 +863,7 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
 fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     parent: &ApplicationWindow,
     on_submit: F,
+    status_container: StatusContainer,
 ) {
     let dialog = Dialog::with_buttons(
         Some("Hidden Network"),
@@ -818,6 +883,12 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     box_.set_margin_start(12);
     box_.set_margin_end(12);
 
+    let error_label = Label::new(None);
+    error_label.add_css_class("yufi-dialog-error");
+    error_label.set_halign(Align::Start);
+    error_label.set_visible(false);
+    status_container.register_dialog_label(&error_label);
+
     let ssid_label = Label::new(Some("Network Name (SSID)"));
     ssid_label.set_halign(Align::Start);
     let ssid_entry = Entry::new();
@@ -829,6 +900,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     pass_entry.set_visibility(false);
     pass_entry.set_placeholder_text(Some("Optional"));
 
+    box_.append(&error_label);
     box_.append(&ssid_label);
     box_.append(&ssid_entry);
     box_.append(&pass_label);
@@ -846,6 +918,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
                 on_submit(ssid, pw);
             }
         }
+        status_container.clear_dialog_label();
         dialog.close();
     });
     dialog.show();
@@ -946,6 +1019,11 @@ fn load_css() {
 
     .yufi-status-error {
         color: #f2a3a3;
+    }
+
+    .yufi-dialog-error {
+        color: #f2a3a3;
+        font-size: 12px;
     }
 
     .yufi-footer {
