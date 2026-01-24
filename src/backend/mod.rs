@@ -35,4 +35,5 @@ pub trait Backend {
     ) -> BackendResult<()>;
     fn get_saved_password(&self, ssid: &str) -> BackendResult<Option<String>>;
     fn set_autoreconnect(&self, ssid: &str, enabled: bool) -> BackendResult<()>;
+    fn forget_network(&self, ssid: &str) -> BackendResult<()>;
 }

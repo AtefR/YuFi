@@ -10,7 +10,8 @@ use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
-    Label, ListBox, ListBoxRow, Orientation, ResponseType, SearchEntry, Spinner, Switch,
+    Label, ListBox, ListBoxRow, MessageDialog, MessageType, Orientation, ResponseType, SearchEntry,
+    Spinner, Stack, Switch,
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
@@ -103,6 +104,7 @@ fn build_ui(app: &Application) {
         &header,
         &list,
         &nm_backend,
+        &state_cache,
         &toggle_guard,
         &window,
         &status_handler,
@@ -133,14 +135,27 @@ fn build_ui(app: &Application) {
     let loading_action = loading.clone();
     let header_action = header_ref.clone();
     let ui_tx_action = ui_tx.clone();
+    let window_action = window.clone();
+    let status_container_connect = status_container.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
-            RowAction::Connect(ssid) => {
-                let ssid_clone = ssid.clone();
-                loading_action.start();
-                update_loading_ui(header_action.as_ref(), &loading_action);
-                spawn_connect_task(&ui_tx_action, ssid_clone, None, false);
+            RowAction::Connect { ssid, is_saved } => {
+                if is_saved {
+                    let ssid_clone = ssid.clone();
+                    loading_action.start();
+                    update_loading_ui(header_action.as_ref(), &loading_action);
+                    spawn_connect_task(&ui_tx_action, ssid_clone, None, false);
+                } else {
+                    prompt_connect_dialog(
+                        &window_action,
+                        &ssid,
+                        &loading_action,
+                        &header_action,
+                        &ui_tx_action,
+                        &status_container_connect,
+                    );
+                }
             }
             RowAction::Disconnect(ssid) => {
                 let ssid_clone = ssid.clone();
@@ -182,7 +197,7 @@ fn build_ui(app: &Application) {
     let header_rx = header_ref.clone();
     let refresh_button_rx = header.refresh.clone();
     let spinner_rx = header.spinner.clone();
-    let _refresh_slot_rx = header.refresh_slot.clone();
+    let refresh_stack_rx = header.refresh_stack.clone();
     let mock_rx = mock_backend.clone();
     let window_rx = window.clone();
     let ui_tx_rx = ui_tx.clone();
@@ -231,9 +246,8 @@ fn build_ui(app: &Application) {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
                     spinner_rx.stop();
-                    spinner_rx.set_visible(false);
+                    refresh_stack_rx.set_visible_child_name("refresh");
                     refresh_button_rx.set_sensitive(true);
-                    refresh_button_rx.set_visible(true);
                     match result {
                         Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
                         Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
@@ -284,14 +298,13 @@ fn build_ui(app: &Application) {
                                     &window_rx,
                                     &ssid,
                                     move |password| {
-                                        let Some(password) = password else { return; };
                                         loading_retry.start();
                                         update_loading_ui(header_retry.as_ref(), &loading_retry);
                                         spawn_connect_task(
                                             &ui_tx_retry,
                                             ssid_retry.clone(),
-                                            Some(password),
-                                            true,
+                                            password.clone(),
+                                            password.is_some(),
                                         );
                                     },
                                     (*status_container_retry).clone(),
@@ -367,7 +380,7 @@ struct HeaderWidgets {
     toggle: Switch,
     refresh: Button,
     spinner: Spinner,
-    refresh_slot: GtkBox,
+    refresh_stack: Stack,
 }
 
 #[derive(Clone)]
@@ -412,20 +425,20 @@ fn build_header(state: &AppState) -> HeaderWidgets {
     refresh.add_css_class("flat");
 
     let spinner = Spinner::new();
-    spinner.set_visible(false);
     spinner.add_css_class("yufi-spinner");
 
-    let refresh_slot = GtkBox::new(Orientation::Horizontal, 0);
-    refresh_slot.add_css_class("yufi-refresh-slot");
-    refresh_slot.set_halign(Align::Center);
-    refresh_slot.set_size_request(36, -1);
-    refresh_slot.append(&refresh);
-    refresh_slot.append(&spinner);
+    let refresh_stack = Stack::new();
+    refresh_stack.add_css_class("yufi-refresh-slot");
+    refresh_stack.set_halign(Align::Center);
+    refresh_stack.set_size_request(36, -1);
+    refresh_stack.add_named(&refresh, Some("refresh"));
+    refresh_stack.add_named(&spinner, Some("spinner"));
+    refresh_stack.set_visible_child_name("refresh");
 
     let toggle = Switch::builder().active(state.wifi_enabled).build();
 
     header.append(&title);
-    header.append(&refresh_slot);
+    header.append(&refresh_stack);
     header.append(&toggle);
 
     HeaderWidgets {
@@ -433,17 +446,15 @@ fn build_header(state: &AppState) -> HeaderWidgets {
         toggle,
         refresh,
         spinner,
-        refresh_slot,
+        refresh_stack,
     }
 }
 
 fn update_loading_ui(header: &HeaderWidgets, loading: &LoadingTracker) {
     if loading.is_active() {
-        header.spinner.set_visible(true);
         header.spinner.start();
     } else {
         header.spinner.stop();
-        header.spinner.set_visible(false);
     }
 }
 
@@ -518,8 +529,17 @@ fn build_network_row(
             button.set_hexpand(true);
             button.set_halign(Align::Fill);
             let ssid = network.ssid.clone();
+            let is_saved = network.is_saved;
             let handler = action_handler.clone();
-            button.connect_clicked(move |_| invoke_action(&handler, RowAction::Connect(ssid.clone())));
+            button.connect_clicked(move |_| {
+                invoke_action(
+                    &handler,
+                    RowAction::Connect {
+                        ssid: ssid.clone(),
+                        is_saved,
+                    },
+                )
+            });
             container.append(&button);
         }
         NetworkAction::Disconnect => {
@@ -647,10 +667,11 @@ fn wire_actions(
     header: &HeaderWidgets,
     list: &ListBox,
     nm_backend: &Rc<NetworkManagerBackend>,
+    state_cache: &Rc<RefCell<AppState>>,
     toggle_guard: &Rc<Cell<bool>>,
     parent: &ApplicationWindow,
     status: &StatusHandler,
-    status_container: &StatusContainer,
+    status_container: &Rc<StatusContainer>,
     loading: &LoadingTracker,
     header_ref: &Rc<HeaderWidgets>,
     ui_tx: &mpsc::Sender<UiEvent>,
@@ -658,18 +679,16 @@ fn wire_actions(
     let status_refresh = status.clone();
     let spinner_refresh = header_ref.spinner.clone();
     let refresh_button = header_ref.refresh.clone();
-    let refresh_slot = header_ref.refresh_slot.clone();
+    let refresh_stack = header_ref.refresh_stack.clone();
     let loading_refresh = loading.clone();
     let header_refresh = header_ref.clone();
     let ui_tx_refresh = ui_tx.clone();
     header.refresh.connect_clicked(move |_| {
         loading_refresh.start();
         update_loading_ui(header_refresh.as_ref(), &loading_refresh);
-        spinner_refresh.set_visible(true);
         spinner_refresh.start();
-        refresh_button.set_visible(false);
         refresh_button.set_sensitive(false);
-        refresh_slot.set_halign(Align::Center);
+        refresh_stack.set_visible_child_name("spinner");
         status_refresh(StatusKind::Info, "Scan requested".to_string());
         spawn_scan_task(&ui_tx_refresh);
     });
@@ -693,15 +712,38 @@ fn wire_actions(
     let window_details = parent.clone();
     let status_details = status.clone();
     let status_details_container = status_container.clone();
+    let loading_details = loading.clone();
+    let header_details = header_ref.clone();
+    let ui_tx_details = ui_tx.clone();
+    let state_details = state_cache.clone();
     list.connect_row_activated(move |_list, row| {
         if let Some(ssid) = ssid_from_row(row) {
-            show_network_details_dialog(
-                &window_details,
-                &ssid,
-                nm_details.clone(),
-                status_details.clone(),
-                status_details_container.clone(),
-            );
+            let is_saved = state_details
+                .borrow()
+                .networks
+                .iter()
+                .find(|network| network.ssid == ssid)
+                .map(|network| network.is_saved)
+                .unwrap_or(false);
+
+            if is_saved {
+                show_network_details_dialog(
+                    &window_details,
+                    &ssid,
+                    nm_details.clone(),
+                    status_details.clone(),
+                    (*status_details_container).clone(),
+                );
+            } else {
+                prompt_connect_dialog(
+                    &window_details,
+                    &ssid,
+                    &loading_details,
+                    &header_details,
+                    &ui_tx_details,
+                    &status_details_container,
+                );
+            }
         }
     });
 }
@@ -741,7 +783,7 @@ enum UiEvent {
 }
 
 enum RowAction {
-    Connect(String),
+    Connect { ssid: String, is_saved: bool },
     Disconnect(String),
 }
 
@@ -1010,6 +1052,20 @@ fn needs_password(err: &BackendError) -> bool {
     }
 }
 
+fn password_error_message(err: &BackendError) -> String {
+    match err {
+        BackendError::Unavailable(message) => {
+            let msg = message.to_lowercase();
+            if msg.contains("nosecrets") || msg.contains("no agents") || msg.contains("no agent") {
+                return "Password unavailable: no secrets agent. Start a polkit agent (e.g. polkit-gnome)."
+                    .to_string();
+            }
+            format!("Failed to load password: {err:?}")
+        }
+        _ => format!("Failed to load password: {err:?}"),
+    }
+}
+
 struct ParsedNetworkInput {
     ip: Option<String>,
     prefix: Option<u32>,
@@ -1019,12 +1075,10 @@ struct ParsedNetworkInput {
 
 fn parse_network_inputs(
     ip_text: &str,
-    prefix_text: &str,
     gateway_text: &str,
     dns_text: &str,
 ) -> Result<ParsedNetworkInput, String> {
     let ip_text = ip_text.trim();
-    let prefix_text = prefix_text.trim();
     let gateway_text = gateway_text.trim();
     let dns_text = dns_text.trim();
 
@@ -1042,22 +1096,13 @@ fn parse_network_inputs(
                 return Err("Invalid IP address".to_string());
             }
             ip = Some(addr.to_string());
-            if prefix_text.is_empty() {
-                prefix = Some(parse_prefix(pre)?);
-            } else {
-                prefix = Some(parse_prefix(prefix_text)?);
-            }
+            prefix = Some(parse_prefix(pre)?);
         } else {
             if !is_ipv4(ip_text) {
                 return Err("Invalid IP address".to_string());
             }
             ip = Some(ip_text.to_string());
-            if !prefix_text.is_empty() {
-                prefix = Some(parse_prefix(prefix_text)?);
-            }
         }
-    } else if !prefix_text.is_empty() {
-        return Err("Prefix requires an IP address".to_string());
     }
 
     let gateway = if gateway_text.is_empty() {
@@ -1148,12 +1193,11 @@ fn show_network_details_dialog(
     status: StatusHandler,
     status_container: StatusContainer,
 ) {
-    let dialog = Dialog::with_buttons(
-        Some("Network Details"),
-        Some(parent),
-        gtk4::DialogFlags::MODAL,
-        &[("Cancel", ResponseType::Cancel), ("Save", ResponseType::Accept)],
-    );
+    let dialog = Dialog::new();
+    dialog.set_title(Some("Network Details"));
+    dialog.set_transient_for(Some(parent));
+    dialog.set_modal(true);
+    dialog.set_default_width(380);
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 10);
@@ -1175,11 +1219,18 @@ fn show_network_details_dialog(
     let password_label = Label::new(Some("Password"));
     password_label.set_halign(Align::Start);
     let password_row = GtkBox::new(Orientation::Horizontal, 8);
+    password_row.set_hexpand(true);
+    password_row.set_halign(Align::Fill);
     let password_entry = Entry::new();
     password_entry.set_visibility(false);
     password_entry.set_placeholder_text(Some("Hidden"));
-    let reveal_button = Button::with_label("Reveal");
-    reveal_button.add_css_class("yufi-secondary");
+    password_entry.set_hexpand(true);
+    let reveal_button = Button::builder()
+        .icon_name("view-reveal-symbolic")
+        .build();
+    reveal_button.add_css_class("yufi-icon-button");
+    reveal_button.add_css_class("flat");
+    reveal_button.set_tooltip_text(Some("Show password"));
 
     let reveal_state = Rc::new(Cell::new(false));
     let reveal_state_clone = reveal_state.clone();
@@ -1191,7 +1242,8 @@ fn show_network_details_dialog(
         if reveal_state_clone.get() {
             password_entry_clone.set_text("");
             password_entry_clone.set_visibility(false);
-            button.set_label("Reveal");
+            button.set_icon_name("view-reveal-symbolic");
+            button.set_tooltip_text(Some("Show password"));
             reveal_state_clone.set(false);
             return;
         }
@@ -1200,7 +1252,8 @@ fn show_network_details_dialog(
             Ok(Some(password)) => {
                 password_entry_clone.set_text(&password);
                 password_entry_clone.set_visibility(true);
-                button.set_label("Hide");
+                button.set_icon_name("view-conceal-symbolic");
+                button.set_tooltip_text(Some("Hide password"));
                 reveal_state_clone.set(true);
             }
             Ok(None) => {
@@ -1209,7 +1262,8 @@ fn show_network_details_dialog(
                 status_reveal(StatusKind::Info, "No saved password".to_string());
             }
             Err(err) => {
-                status_reveal(StatusKind::Error, format!("Failed to load password: {err:?}"));
+                let message = password_error_message(&err);
+                status_reveal(StatusKind::Error, message);
             }
         }
     });
@@ -1221,11 +1275,6 @@ fn show_network_details_dialog(
     ip_label.set_halign(Align::Start);
     let ip_entry = Entry::new();
     ip_entry.set_placeholder_text(Some("e.g. 192.168.1.124"));
-
-    let prefix_label = Label::new(Some("Prefix"));
-    prefix_label.set_halign(Align::Start);
-    let prefix_entry = Entry::new();
-    prefix_entry.set_placeholder_text(Some("e.g. 24"));
 
     let gateway_label = Label::new(Some("Gateway"));
     gateway_label.set_halign(Align::Start);
@@ -1251,14 +1300,37 @@ fn show_network_details_dialog(
     box_.append(&password_row);
     box_.append(&ip_label);
     box_.append(&ip_entry);
-    box_.append(&prefix_label);
-    box_.append(&prefix_entry);
     box_.append(&gateway_label);
     box_.append(&gateway_entry);
     box_.append(&dns_label);
     box_.append(&dns_entry);
     box_.append(&auto_row);
+
+    let actions = GtkBox::new(Orientation::Vertical, 8);
+    actions.set_hexpand(true);
+
+    let save_button = Button::with_label("Save");
+    save_button.add_css_class("yufi-primary");
+    save_button.add_css_class("suggested-action");
+    save_button.set_hexpand(true);
+    save_button.set_halign(Align::Fill);
+
+    let cancel_button = Button::with_label("Cancel");
+    cancel_button.set_hexpand(true);
+    cancel_button.set_halign(Align::Fill);
+
+    let forget_button = Button::with_label("Forget Network");
+    forget_button.add_css_class("destructive-action");
+    forget_button.set_hexpand(true);
+    forget_button.set_halign(Align::Fill);
+
+    actions.append(&save_button);
+    actions.append(&cancel_button);
+    actions.append(&forget_button);
+
+    box_.append(&actions);
     content.append(&box_);
+    dialog.set_default_widget(Some(&save_button));
 
     let details = backend
         .get_network_details(ssid)
@@ -1266,9 +1338,6 @@ fn show_network_details_dialog(
 
     if let Some(ip) = details.ip_address {
         ip_entry.set_text(&ip);
-    }
-    if let Some(prefix) = details.prefix {
-        prefix_entry.set_text(&prefix.to_string());
     }
     if let Some(gateway) = details.gateway {
         gateway_entry.set_text(&gateway);
@@ -1280,60 +1349,128 @@ fn show_network_details_dialog(
         auto_switch.set_active(auto);
     }
 
+    let backend_forget = backend.clone();
+    let ssid_forget = ssid.to_string();
+    let status_forget = status.clone();
+    let status_container_forget = status_container.clone();
+    let dialog_forget = dialog.clone();
+    let parent_forget = parent.clone();
+    forget_button.connect_clicked(move |_| {
+        let confirm = MessageDialog::builder()
+            .transient_for(&parent_forget)
+            .modal(true)
+            .message_type(MessageType::Warning)
+            .text("Forget this network?")
+            .secondary_text("Saved credentials and settings will be removed.")
+            .build();
+        confirm.add_button("Cancel", ResponseType::Cancel);
+        confirm.add_button("Forget", ResponseType::Accept);
+        confirm.set_default_response(ResponseType::Cancel);
+        if let Some(forget_action) = confirm.widget_for_response(ResponseType::Accept) {
+            forget_action.add_css_class("destructive-action");
+        }
+        let backend_confirm = backend_forget.clone();
+        let ssid_confirm = ssid_forget.clone();
+        let status_confirm = status_forget.clone();
+        let status_container_confirm = status_container_forget.clone();
+        let dialog_close = dialog_forget.clone();
+        confirm.connect_response(move |dialog, response| {
+            if response == ResponseType::Accept {
+                match backend_confirm.forget_network(&ssid_confirm) {
+                    Ok(_) => {
+                        status_confirm(StatusKind::Success, "Network forgotten".to_string());
+                        status_container_confirm.clear_dialog_label();
+                        dialog_close.close();
+                    }
+                    Err(err) => {
+                        status_confirm(StatusKind::Error, format!("Failed to forget: {err:?}"));
+                    }
+                }
+            }
+            dialog.close();
+        });
+        confirm.show();
+    });
+
     let ip_entry = ip_entry.clone();
-    let prefix_entry = prefix_entry.clone();
     let gateway_entry = gateway_entry.clone();
     let dns_entry = dns_entry.clone();
     let auto_switch = auto_switch.clone();
     let ssid = ssid.to_string();
     let status_save = status.clone();
     let status_container = status_container.clone();
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let ip_text = ip_entry.text().to_string();
-            let prefix_text = prefix_entry.text().to_string();
-            let gateway_text = gateway_entry.text().to_string();
-            let dns_text = dns_entry.text().to_string();
+    let status_container_save = status_container.clone();
+    let dialog_save = dialog.clone();
+    let backend_save = backend.clone();
+    save_button.connect_clicked(move |_| {
+        let ip_text = ip_entry.text().to_string();
+        let gateway_text = gateway_entry.text().to_string();
+        let dns_text = dns_entry.text().to_string();
 
-            let parsed = match parse_network_inputs(
-                &ip_text,
-                &prefix_text,
-                &gateway_text,
-                &dns_text,
-            ) {
-                Ok(parsed) => parsed,
-                Err(message) => {
-                    status_container.show_dialog_error(message);
-                    return;
-                }
-            };
+        let parsed = match parse_network_inputs(&ip_text, &gateway_text, &dns_text) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                status_container_save.show_dialog_error(message);
+                return;
+            }
+        };
 
-            let mut failed = false;
-            if let Err(err) = backend.set_ip_dns(
-                &ssid,
-                parsed.ip.as_deref(),
-                parsed.prefix,
-                parsed.gateway.as_deref(),
-                parsed.dns,
-            ) {
-                failed = true;
-                status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
-            }
-            if let Err(err) = backend.set_autoreconnect(&ssid, auto_switch.is_active()) {
-                failed = true;
-                status_save(StatusKind::Error, format!("Failed to set auto‑reconnect: {err:?}"));
-            }
-            if !failed {
-                status_save(StatusKind::Success, "Saved network settings".to_string());
-            }
-            status_container.clear_dialog_label();
-            dialog.close();
-        } else {
-            status_container.clear_dialog_label();
-            dialog.close();
+        let mut failed = false;
+        if let Err(err) = backend_save.set_ip_dns(
+            &ssid,
+            parsed.ip.as_deref(),
+            parsed.prefix,
+            parsed.gateway.as_deref(),
+            parsed.dns,
+        ) {
+            failed = true;
+            status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
         }
+        if let Err(err) = backend_save.set_autoreconnect(&ssid, auto_switch.is_active()) {
+            failed = true;
+            status_save(StatusKind::Error, format!("Failed to set auto‑reconnect: {err:?}"));
+        }
+        if !failed {
+            status_save(StatusKind::Success, "Saved network settings".to_string());
+        }
+        status_container_save.clear_dialog_label();
+        dialog_save.close();
+    });
+
+    let dialog_cancel = dialog.clone();
+    let status_container_cancel = status_container.clone();
+    cancel_button.connect_clicked(move |_| {
+        status_container_cancel.clear_dialog_label();
+        dialog_cancel.close();
     });
     dialog.show();
+}
+
+fn prompt_connect_dialog(
+    parent: &ApplicationWindow,
+    ssid: &str,
+    loading: &LoadingTracker,
+    header: &Rc<HeaderWidgets>,
+    ui_tx: &mpsc::Sender<UiEvent>,
+    status_container: &Rc<StatusContainer>,
+) {
+    let ssid = ssid.to_string();
+    let ssid_label = ssid.clone();
+    let ssid_connect = ssid.clone();
+    let loading = loading.clone();
+    let header = header.clone();
+    let ui_tx = ui_tx.clone();
+    let status_container = (**status_container).clone();
+    show_password_dialog(
+        parent,
+        &ssid_label,
+        move |password| {
+            loading.start();
+            update_loading_ui(header.as_ref(), &loading);
+            spawn_connect_task(&ui_tx, ssid_connect.clone(), password.clone(), password.is_some());
+        },
+        status_container,
+    );
 }
 
 fn show_password_dialog<F: Fn(Option<String>) + 'static>(
@@ -1369,7 +1506,7 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     label.set_halign(Align::Start);
     let entry = Entry::new();
     entry.set_visibility(false);
-    entry.set_placeholder_text(Some("Required"));
+    entry.set_placeholder_text(Some("Optional (leave empty for open network)"));
 
     box_.append(&error_label);
     box_.append(&label);
@@ -1384,12 +1521,8 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
             let text = entry_clone.text().to_string();
-            if text.is_empty() {
-                error_label.set_text("Password is required");
-                error_label.set_visible(true);
-                return;
-            }
-            on_submit(Some(text));
+            let password = if text.trim().is_empty() { None } else { Some(text) };
+            on_submit(password);
             status_container.clear_dialog_label();
             dialog.close();
         } else {

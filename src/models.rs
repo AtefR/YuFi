@@ -12,6 +12,7 @@ pub struct Network {
     pub action: NetworkAction,
     pub strength: u8,
     pub is_active: bool,
+    pub is_saved: bool,
 }
 
 #[derive(Clone, Debug)]

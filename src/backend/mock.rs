@@ -18,6 +18,7 @@ impl MockBackend {
                     action: NetworkAction::Disconnect,
                     strength: 90,
                     is_active: true,
+                    is_saved: true,
                 },
                 Network {
                     ssid: "Office_Main".to_string(),
@@ -25,6 +26,7 @@ impl MockBackend {
                     action: NetworkAction::None,
                     strength: 60,
                     is_active: false,
+                    is_saved: true,
                 },
                 Network {
                     ssid: "Coffee_Shop_Free".to_string(),
@@ -32,6 +34,7 @@ impl MockBackend {
                     action: NetworkAction::None,
                     strength: 55,
                     is_active: false,
+                    is_saved: false,
                 },
                 Network {
                     ssid: "Guest_Network".to_string(),
@@ -39,6 +42,7 @@ impl MockBackend {
                     action: NetworkAction::Connect,
                     strength: 48,
                     is_active: false,
+                    is_saved: false,
                 },
                 Network {
                     ssid: "Linksys_502".to_string(),
@@ -46,6 +50,7 @@ impl MockBackend {
                     action: NetworkAction::None,
                     strength: 15,
                     is_active: false,
+                    is_saved: false,
                 },
             ],
         }
@@ -102,6 +107,10 @@ impl Backend for MockBackend {
     }
 
     fn set_autoreconnect(&self, _ssid: &str, _enabled: bool) -> BackendResult<()> {
+        Ok(())
+    }
+
+    fn forget_network(&self, _ssid: &str) -> BackendResult<()> {
         Ok(())
     }
 }

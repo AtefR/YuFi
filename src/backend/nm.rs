@@ -1,6 +1,6 @@
 use crate::backend::{Backend, BackendError, BackendResult};
 use crate::models::{AppState, Network, NetworkAction, NetworkDetails};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{Array, OwnedObjectPath, OwnedValue, Str};
 
@@ -23,6 +23,10 @@ impl Backend for NetworkManagerBackend {
 
         let wifi_device = first_wifi_device(&conn, &nm)?;
         let wireless = wireless_proxy(&conn, &wifi_device)?;
+        let saved_ssids = match nm_settings_proxy(&conn) {
+            Ok(settings) => saved_wifi_ssids(&conn, &settings).unwrap_or_default(),
+            Err(_) => HashSet::new(),
+        };
 
         let active_ap: OwnedObjectPath = wireless
             .get_property("ActiveAccessPoint")
@@ -72,7 +76,9 @@ impl Backend for NetworkManagerBackend {
 
         let mut networks: Vec<Network> = best_by_ssid
             .into_iter()
-            .map(|(ssid, (strength, is_active, icon))| Network {
+            .map(|(ssid, (strength, is_active, icon))| {
+                let is_saved = saved_ssids.contains(&ssid);
+                Network {
                 ssid,
                 signal_icon: icon,
                 action: if !wifi_enabled {
@@ -84,7 +90,8 @@ impl Backend for NetworkManagerBackend {
                 },
                 strength,
                 is_active,
-            })
+                is_saved,
+            }})
             .collect();
 
         networks.sort_by(|a, b| {
@@ -368,6 +375,19 @@ impl Backend for NetworkManagerBackend {
 
         update_connection(&conn, &connection_path, settings_map)
     }
+
+    fn forget_network(&self, ssid: &str) -> BackendResult<()> {
+        let conn = system_bus()?;
+        let settings = nm_settings_proxy(&conn)?;
+        let connection_path = find_connection_for_ssid(&conn, &settings, ssid)?
+            .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
+
+        let connection = connection_proxy(&conn, &connection_path)?;
+        let _: () = connection
+            .call("Delete", &())
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+        Ok(())
+    }
 }
 
 pub mod nm_consts {
@@ -649,6 +669,40 @@ fn find_connection_for_ssid(
     }
 
     Ok(None)
+}
+
+fn saved_wifi_ssids(
+    conn: &Connection,
+    settings: &Proxy<'_>,
+) -> BackendResult<HashSet<String>> {
+    let connections: Vec<OwnedObjectPath> = settings
+        .call("ListConnections", &())
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    let mut ssids = HashSet::new();
+    for path in connections {
+        let connection_proxy = Proxy::new(
+            conn,
+            nm_consts::BUS_NAME,
+            path.as_str(),
+            nm_consts::CONNECTION_INTERFACE,
+        )
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+        let settings_map: HashMap<String, HashMap<String, OwnedValue>> = connection_proxy
+            .call("GetSettings", &())
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+        if let Some(wireless) = settings_map.get("802-11-wireless") {
+            if let Some(ssid_value) = wireless.get("ssid") {
+                if let Some(current_ssid) = ssid_from_value(ssid_value) {
+                    ssids.insert(current_ssid);
+                }
+            }
+        }
+    }
+
+    Ok(ssids)
 }
 
 fn find_active_connection_for_ssid(
