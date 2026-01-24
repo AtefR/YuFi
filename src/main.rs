@@ -556,6 +556,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
             ("Connect", ResponseType::Accept),
         ],
     );
+    dialog.set_default_width(340);
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 8);
