@@ -1563,6 +1563,7 @@ fn show_network_details_dialog(
     dialog.set_transient_for(Some(parent));
     dialog.set_modal(true);
     dialog.set_default_width(380);
+    dialog.set_resizable(true);
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 10);
@@ -1639,6 +1640,8 @@ fn show_network_details_dialog(
     password_row.append(&password_entry);
     password_row.append(&reveal_button);
 
+    let manual_fields = GtkBox::new(Orientation::Vertical, 8);
+
     let ip_label = Label::new(Some("IP Address"));
     ip_label.set_halign(Align::Start);
     let ip_entry = Entry::new();
@@ -1672,15 +1675,17 @@ fn show_network_details_dialog(
 
     box_.append(&error_label);
     box_.append(&title);
+    manual_fields.append(&ip_label);
+    manual_fields.append(&ip_entry);
+    manual_fields.append(&gateway_label);
+    manual_fields.append(&gateway_entry);
+    manual_fields.append(&dns_label);
+    manual_fields.append(&dns_entry);
+
     box_.append(&password_label);
     box_.append(&password_row);
     box_.append(&dhcp_row);
-    box_.append(&ip_label);
-    box_.append(&ip_entry);
-    box_.append(&gateway_label);
-    box_.append(&gateway_entry);
-    box_.append(&dns_label);
-    box_.append(&dns_entry);
+    box_.append(&manual_fields);
     box_.append(&auto_row);
 
     let actions = GtkBox::new(Orientation::Vertical, 8);
@@ -1733,7 +1738,7 @@ fn show_network_details_dialog(
         has_manual = true;
     }
     dhcp_switch.set_active(!has_manual);
-    set_manual_fields_enabled(&ip_entry, &gateway_entry, &dns_entry, !dhcp_switch.is_active());
+    manual_fields.set_visible(!dhcp_switch.is_active());
     if let Some(auto) = details.auto_reconnect {
         auto_switch.set_active(auto);
     }
@@ -1790,12 +1795,14 @@ fn show_network_details_dialog(
     let ip_entry = ip_entry.clone();
     let gateway_entry = gateway_entry.clone();
     let dns_entry = dns_entry.clone();
+    let manual_fields_toggle = manual_fields.clone();
     let dhcp_switch_clone = dhcp_switch.clone();
     let ip_toggle = ip_entry.clone();
     let gateway_toggle = gateway_entry.clone();
     let dns_toggle = dns_entry.clone();
     dhcp_switch.connect_state_set(move |_switch, state| {
         set_manual_fields_enabled(&ip_toggle, &gateway_toggle, &dns_toggle, !state);
+        manual_fields_toggle.set_visible(!state);
         Propagation::Proceed
     });
 
