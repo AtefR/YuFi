@@ -7,10 +7,9 @@
   </defs>
   <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#bg)"/>
   <g fill="none" stroke="#3b82f6" stroke-linecap="round" stroke-width="28">
-    <path d="M156 244a140 140 0 0 1 200 0"/>
-    <path d="M196 284a88 88 0 0 1 120 0"/>
-    <path d="M236 324a36 36 0 0 1 40 0"/>
+    <path d="M156 220a140 140 0 0 1 200 0"/>
+    <path d="M196 260a88 88 0 0 1 120 0"/>
+    <path d="M236 300a36 36 0 0 1 40 0"/>
   </g>
-  <circle cx="256" cy="372" r="16" fill="#3b82f6"/>
-  <text x="256" y="170" text-anchor="middle" font-family="Cantarell, sans-serif" font-size="44" fill="#e6e6e6">YuFi</text>
+  <circle cx="256" cy="348" r="16" fill="#3b82f6"/>
 </svg>
