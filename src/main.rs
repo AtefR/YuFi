@@ -64,9 +64,22 @@ fn build_ui(app: &Application) {
     let (status_bar, status_label) = build_status();
     let status_handler = build_status_handler(&status_label);
     let list = build_network_list();
+    let state_cache = Rc::new(RefCell::new(state.clone()));
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
-    populate_network_list(&list, &state, &action_handler, optimistic_active.borrow().as_deref());
+    let filtered_state = filter_state(&state, &search.text().to_string());
+    let empty_label = empty_label_for(
+        &state,
+        &search.text().to_string(),
+        filtered_state.networks.len(),
+    );
+    populate_network_list(
+        &list,
+        &filtered_state,
+        &action_handler,
+        optimistic_active.borrow().as_deref(),
+        empty_label,
+    );
     let status_container = Rc::new(StatusContainer {
         dialog_label: Rc::new(RefCell::new(None)),
     });
@@ -95,6 +108,24 @@ fn build_ui(app: &Application) {
         &header_ref,
         &ui_tx,
     );
+
+    let list_search = list.clone();
+    let handler_search = action_handler.clone();
+    let state_search = state_cache.clone();
+    let optimistic_search = optimistic_active.clone();
+    search.connect_changed(move |entry| {
+        let query = entry.text().to_string();
+        let state = state_search.borrow().clone();
+        let filtered = filter_state(&state, &query);
+        let empty_label = empty_label_for(&state, &query, filtered.networks.len());
+        populate_network_list(
+            &list_search,
+            &filtered,
+            &handler_search,
+            optimistic_search.borrow().as_deref(),
+            empty_label,
+        );
+    });
 
     let loading_action = loading.clone();
     let header_action = header_ref.clone();
@@ -154,6 +185,8 @@ fn build_ui(app: &Application) {
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
     let optimistic_active_rx = optimistic_active.clone();
+    let state_cache_rx = state_cache.clone();
+    let search_rx = search.clone();
 
     gtk4::glib::timeout_add_local(Duration::from_millis(100), move || {
         while let Ok(event) = ui_rx.borrow().try_recv() {
@@ -174,11 +207,16 @@ fn build_ui(app: &Application) {
                     if state.networks.iter().any(|n| matches!(n.action, NetworkAction::Disconnect)) {
                         *optimistic_active_rx.borrow_mut() = None;
                     }
+                    *state_cache_rx.borrow_mut() = state.clone();
+                    let query = search_rx.text().to_string();
+                    let filtered = filter_state(&state, &query);
+                    let empty_label = empty_label_for(&state, &query, filtered.networks.len());
                     populate_network_list(
                         &list_rx,
-                        &state,
+                        &filtered,
                         &handler_rx,
                         optimistic_active_rx.borrow().as_deref(),
+                        empty_label,
                     );
                 }
                 UiEvent::ScanDone(result) => {
@@ -509,15 +547,73 @@ fn populate_network_list(
     state: &AppState,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     optimistic_active: Option<&str>,
+    empty_label: Option<&str>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
+    }
+
+    if state.networks.is_empty() {
+        if let Some(label) = empty_label {
+            list.append(&build_empty_row(label));
+        }
+        return;
     }
 
     for network in &state.networks {
         let effective_action = effective_action_for(state, network, optimistic_active);
         list.append(&build_network_row(network, action_handler, effective_action));
     }
+}
+
+fn filter_state(state: &AppState, query: &str) -> AppState {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return state.clone();
+    }
+
+    let networks = state
+        .networks
+        .iter()
+        .filter(|network| network.ssid.to_lowercase().contains(&query))
+        .cloned()
+        .collect();
+
+    AppState {
+        wifi_enabled: state.wifi_enabled,
+        networks,
+    }
+}
+
+fn empty_label_for(state: &AppState, query: &str, filtered_len: usize) -> Option<&'static str> {
+    if !state.wifi_enabled {
+        return Some("Wi-Fi is disabled");
+    }
+    if state.networks.is_empty() {
+        return Some("No networks found");
+    }
+    if !query.trim().is_empty() && filtered_len == 0 {
+        return Some("No matching networks");
+    }
+    None
+}
+
+fn build_empty_row(text: &str) -> ListBoxRow {
+    let row = ListBoxRow::new();
+    row.set_activatable(false);
+    row.set_selectable(false);
+    row.add_css_class("yufi-empty-row");
+
+    let label = Label::new(Some(text));
+    label.add_css_class("yufi-empty-label");
+    label.set_halign(Align::Start);
+    label.set_margin_top(6);
+    label.set_margin_bottom(6);
+    label.set_margin_start(6);
+    label.set_margin_end(6);
+
+    row.set_child(Some(&label));
+    row
 }
 
 fn wire_actions(
@@ -1352,6 +1448,15 @@ fn load_css() {
 
     .yufi-refresh-slot {
         min-width: 36px;
+    }
+
+    .yufi-empty-row {
+        background: transparent;
+    }
+
+    .yufi-empty-label {
+        color: #9a9a9a;
+        font-size: 12px;
     }
     "#;
 
