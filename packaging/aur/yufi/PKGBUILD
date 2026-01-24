@@ -8,7 +8,7 @@ license=("MIT")
 depends=("gtk4" "networkmanager")
 makedepends=("cargo" "rust" "pkgconf")
 source=("$pkgname-$pkgver.tar.gz::https://github.com/AtefR/YuFi/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('23dcf63a5f16e17a85e1fd3ae9abf1a09008bfa95c815cf3b327b5cd632a2798')
 
 build() {
   cd "$srcdir/YuFi-$pkgver"

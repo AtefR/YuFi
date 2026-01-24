@@ -11,6 +11,6 @@ pkgbase = yufi
 	depends = gtk4
 	depends = networkmanager
 	source = yufi-1.0.0.tar.gz::https://github.com/AtefR/YuFi/archive/refs/tags/v1.0.0.tar.gz
-	sha256sums = SKIP
+	sha256sums = 23dcf63a5f16e17a85e1fd3ae9abf1a09008bfa95c815cf3b327b5cd632a2798
 
 pkgname = yufi
