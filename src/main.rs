@@ -731,6 +731,7 @@ fn wire_actions(
                     &window_details,
                     &ssid,
                     nm_details.clone(),
+                    ui_tx_details.clone(),
                     status_details.clone(),
                     (*status_details_container).clone(),
                 );
@@ -1190,6 +1191,7 @@ fn show_network_details_dialog(
     parent: &ApplicationWindow,
     ssid: &str,
     backend: Rc<NetworkManagerBackend>,
+    ui_tx: mpsc::Sender<UiEvent>,
     status: StatusHandler,
     status_container: StatusContainer,
 ) {
@@ -1355,6 +1357,7 @@ fn show_network_details_dialog(
     let status_container_forget = status_container.clone();
     let dialog_forget = dialog.clone();
     let parent_forget = parent.clone();
+    let ui_tx_forget = ui_tx.clone();
     forget_button.connect_clicked(move |_| {
         let confirm = MessageDialog::builder()
             .transient_for(&parent_forget)
@@ -1374,6 +1377,7 @@ fn show_network_details_dialog(
         let status_confirm = status_forget.clone();
         let status_container_confirm = status_container_forget.clone();
         let dialog_close = dialog_forget.clone();
+        let ui_tx_confirm = ui_tx_forget.clone();
         confirm.connect_response(move |dialog, response| {
             if response == ResponseType::Accept {
                 match backend_confirm.forget_network(&ssid_confirm) {
@@ -1381,6 +1385,7 @@ fn show_network_details_dialog(
                         status_confirm(StatusKind::Success, "Network forgotten".to_string());
                         status_container_confirm.clear_dialog_label();
                         dialog_close.close();
+                        request_state_refresh(&ui_tx_confirm);
                     }
                     Err(err) => {
                         status_confirm(StatusKind::Error, format!("Failed to forget: {err:?}"));
@@ -1479,15 +1484,11 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     on_submit: F,
     status_container: StatusContainer,
 ) {
-    let dialog = Dialog::with_buttons(
-        Some("Connect to network"),
-        Some(parent),
-        gtk4::DialogFlags::MODAL,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("Connect", ResponseType::Accept),
-        ],
-    );
+    let dialog = Dialog::new();
+    dialog.set_title(Some("Connect to network"));
+    dialog.set_transient_for(Some(parent));
+    dialog.set_modal(true);
+    dialog.set_default_width(380);
 
     let content = dialog.content_area();
     let box_ = GtkBox::new(Orientation::Vertical, 8);
@@ -1511,24 +1512,46 @@ fn show_password_dialog<F: Fn(Option<String>) + 'static>(
     box_.append(&error_label);
     box_.append(&label);
     box_.append(&entry);
+
+    let actions = GtkBox::new(Orientation::Horizontal, 8);
+    actions.set_hexpand(true);
+
+    let cancel_button = Button::with_label("Cancel");
+    cancel_button.set_hexpand(true);
+    cancel_button.set_halign(Align::Fill);
+
+    let connect_button = Button::with_label("Connect");
+    connect_button.add_css_class("yufi-primary");
+    connect_button.add_css_class("suggested-action");
+    connect_button.set_hexpand(true);
+    connect_button.set_halign(Align::Fill);
+
+    actions.append(&cancel_button);
+    actions.append(&connect_button);
+    box_.append(&actions);
     content.append(&box_);
+    dialog.set_default_widget(Some(&connect_button));
 
     let entry_clone = entry.clone();
     let error_label_clone = error_label.clone();
     entry.connect_changed(move |_| {
         error_label_clone.set_visible(false);
     });
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let text = entry_clone.text().to_string();
-            let password = if text.trim().is_empty() { None } else { Some(text) };
-            on_submit(password);
-            status_container.clear_dialog_label();
-            dialog.close();
-        } else {
-            status_container.clear_dialog_label();
-            dialog.close();
-        }
+
+    let dialog_connect = dialog.clone();
+    let status_connect = status_container.clone();
+    connect_button.connect_clicked(move |_| {
+        let text = entry_clone.text().to_string();
+        let password = if text.trim().is_empty() { None } else { Some(text) };
+        on_submit(password);
+        status_connect.clear_dialog_label();
+        dialog_connect.close();
+    });
+
+    let dialog_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| {
+        status_container.clear_dialog_label();
+        dialog_cancel.close();
     });
     dialog.show();
 }
