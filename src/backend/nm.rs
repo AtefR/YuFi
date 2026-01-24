@@ -1,6 +1,6 @@
 use crate::backend::{Backend, BackendError, BackendResult};
 use crate::models::{AppState, Network, NetworkAction, NetworkDetails};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{Array, OwnedObjectPath, OwnedValue, Str};
 
@@ -27,7 +27,7 @@ impl Backend for NetworkManagerBackend {
         let active_ap: OwnedObjectPath = wireless
             .get_property("ActiveAccessPoint")
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-        let active_ssids = active_ssids(&conn, &nm)?;
+        let active_ssid = active_ssid_for_device(&conn, &wifi_device)?;
 
         let ap_paths: Vec<OwnedObjectPath> = wireless
             .call("GetAccessPoints", &())
@@ -49,7 +49,8 @@ impl Backend for NetworkManagerBackend {
                 .get_property("Strength")
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-            let is_active = ap_path == active_ap || active_ssids.contains(&ssid);
+            let is_active =
+                ap_path == active_ap || active_ssid.as_deref().is_some_and(|v| v == ssid);
             let icon = icon_for_strength(strength);
 
             match best_by_ssid.get(&ssid) {
@@ -703,44 +704,48 @@ fn find_active_connection_for_ssid(
     Ok(None)
 }
 
-fn active_ssids(conn: &Connection, nm: &Proxy<'_>) -> BackendResult<HashSet<String>> {
-    let active: Vec<OwnedObjectPath> = nm
-        .get_property("ActiveConnections")
+fn active_ssid_for_device(
+    conn: &Connection,
+    device_path: &OwnedObjectPath,
+) -> BackendResult<Option<String>> {
+    let device = device_proxy(conn, device_path)?;
+    let active: OwnedObjectPath = device
+        .get_property("ActiveConnection")
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-    let mut ssids = HashSet::new();
-    for path in active {
-        let active_proxy = Proxy::new(
-            conn,
-            nm_consts::BUS_NAME,
-            path.as_str(),
-            "org.freedesktop.NetworkManager.Connection.Active",
-        )
+    if active.as_str() == "/" {
+        return Ok(None);
+    }
+
+    let active_proxy = Proxy::new(
+        conn,
+        nm_consts::BUS_NAME,
+        active.as_str(),
+        "org.freedesktop.NetworkManager.Connection.Active",
+    )
+    .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+    let connection: OwnedObjectPath = active_proxy
+        .get_property("Connection")
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-        let connection: OwnedObjectPath = active_proxy
-            .get_property("Connection")
-            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    let settings_map = connection_settings(conn, &connection)?;
 
-        let settings_map = connection_settings(conn, &connection)?;
-
-        if let Some(wireless) = settings_map.get("802-11-wireless") {
-            if let Some(ssid_value) = wireless.get("ssid") {
-                if let Some(current_ssid) = ssid_from_value(ssid_value) {
-                    ssids.insert(current_ssid);
-                    continue;
-                }
-            }
-        }
-
-        if let Some(connection) = settings_map.get("connection") {
-            if let Some(id_value) = connection.get("id") {
-                if let Ok(id) = owned_value_to_string(id_value) {
-                    ssids.insert(id);
-                }
+    if let Some(wireless) = settings_map.get("802-11-wireless") {
+        if let Some(ssid_value) = wireless.get("ssid") {
+            if let Some(current_ssid) = ssid_from_value(ssid_value) {
+                return Ok(Some(current_ssid));
             }
         }
     }
 
-    Ok(ssids)
+    if let Some(connection) = settings_map.get("connection") {
+        if let Some(id_value) = connection.get("id") {
+            if let Ok(id) = owned_value_to_string(id_value) {
+                return Ok(Some(id));
+            }
+        }
+    }
+
+    Ok(None)
 }
