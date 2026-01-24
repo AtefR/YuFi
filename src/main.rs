@@ -5,6 +5,7 @@ use backend::{Backend, BackendError};
 use backend::mock::MockBackend;
 use backend::nm::NetworkManagerBackend;
 use gtk4::gdk::Display;
+use gtk4::glib::ControlFlow;
 use gtk4::glib::Propagation;
 use gtk4::prelude::*;
 use gtk4::{
@@ -14,6 +15,7 @@ use gtk4::{
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 fn main() {
     let app = Application::builder()
@@ -53,6 +55,8 @@ fn build_ui(app: &Application) {
 
     let header = build_header(&state);
     let search = build_search();
+    let (status_bar, status_label) = build_status();
+    let status_handler = build_status_handler(&status_label);
     let list = build_network_list();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     populate_network_list(&list, &state, &action_handler);
@@ -62,6 +66,7 @@ fn build_ui(app: &Application) {
 
     panel.append(&header.container);
     panel.append(&search);
+    panel.append(&status_bar);
     panel.append(&list);
     panel.append(&spacer);
     panel.append(&hidden);
@@ -76,6 +81,7 @@ fn build_ui(app: &Application) {
         &toggle_guard,
         &action_handler,
         &window,
+        &status_handler,
     );
 
     let list_action = list.clone();
@@ -85,6 +91,7 @@ fn build_ui(app: &Application) {
     let guard_action = toggle_guard.clone();
     let handler_ref = action_handler.clone();
     let window_ref = window.clone();
+    let status_action = status_handler.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
@@ -96,11 +103,13 @@ fn build_ui(app: &Application) {
                 let guard_action = guard_action.clone();
                 let handler_ref = handler_ref.clone();
                 let ssid_clone = ssid.clone();
+                let status_action = status_action.clone();
                 show_password_dialog(&window_ref, &ssid, move |password| {
-                    if let Err(err) =
-                        nm_action.connect_network(&ssid_clone, password.as_deref())
-                    {
-                        eprintln!("Connect failed: {err:?}");
+                    match nm_action.connect_network(&ssid_clone, password.as_deref()) {
+                        Ok(_) => status_action(StatusKind::Success, format!("Connected to {ssid_clone}")),
+                        Err(err) => {
+                            status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
+                        }
                     }
                     refresh_ui(
                         &list_action,
@@ -113,8 +122,9 @@ fn build_ui(app: &Application) {
                 });
             }
             RowAction::Disconnect(ssid) => {
-                if let Err(err) = nm_action.disconnect_network(&ssid) {
-                    eprintln!("Disconnect failed: {err:?}");
+                match nm_action.disconnect_network(&ssid) {
+                    Ok(_) => status_action(StatusKind::Success, format!("Disconnected from {ssid}")),
+                    Err(err) => status_action(StatusKind::Error, format!("Disconnect failed: {err:?}")),
                 }
                 refresh_ui(
                     &list_action,
@@ -135,6 +145,7 @@ fn build_ui(app: &Application) {
     let hidden_guard = toggle_guard.clone();
     let hidden_handler = action_handler.clone();
     let hidden_window = window.clone();
+    let hidden_status = status_handler.clone();
     hidden.connect_clicked(move |_| {
         let nm = hidden_nm.clone();
         let list = hidden_list.clone();
@@ -142,9 +153,11 @@ fn build_ui(app: &Application) {
         let mock = hidden_mock.clone();
         let guard = hidden_guard.clone();
         let handler = hidden_handler.clone();
+        let status = hidden_status.clone();
         show_hidden_network_dialog(&hidden_window, move |ssid, password| {
-            if let Err(err) = nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
-                eprintln!("Hidden connect failed: {err:?}");
+            match nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
+                Ok(_) => status(StatusKind::Success, format!("Connected to {ssid}")),
+                Err(err) => status(StatusKind::Error, format!("Hidden connect failed: {err:?}")),
             }
             refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
         });
@@ -191,6 +204,20 @@ fn build_search() -> SearchEntry {
     search.set_placeholder_text(Some("Search networks..."));
     search.add_css_class("yufi-search");
     search
+}
+
+fn build_status() -> (GtkBox, Label) {
+    let status_bar = GtkBox::new(Orientation::Horizontal, 0);
+    status_bar.add_css_class("yufi-status-bar");
+
+    let status = Label::new(None);
+    status.add_css_class("yufi-status");
+    status.set_halign(Align::Start);
+    status.set_hexpand(true);
+    status.set_visible(false);
+
+    status_bar.append(&status);
+    (status_bar, status)
 }
 
 fn build_network_list() -> ListBox {
@@ -291,6 +318,7 @@ fn wire_actions(
     toggle_guard: &Rc<Cell<bool>>,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     parent: &ApplicationWindow,
+    status: &StatusHandler,
 ) {
     let list_refresh = list.clone();
     let toggle_refresh = header.toggle.clone();
@@ -298,9 +326,11 @@ fn wire_actions(
     let mock_refresh = mock_backend.clone();
     let guard_refresh = toggle_guard.clone();
     let handler_refresh = action_handler.clone();
+    let status_refresh = status.clone();
     header.refresh.connect_clicked(move |_| {
-        if let Err(err) = nm_refresh.request_scan() {
-            eprintln!("Scan request failed: {err:?}");
+        match nm_refresh.request_scan() {
+            Ok(_) => status_refresh(StatusKind::Info, "Scan requested".to_string()),
+            Err(err) => status_refresh(StatusKind::Error, format!("Scan failed: {err:?}")),
         }
         refresh_ui(
             &list_refresh,
@@ -318,13 +348,18 @@ fn wire_actions(
     let mock_toggle = mock_backend.clone();
     let guard_toggle = toggle_guard.clone();
     let handler_toggle = action_handler.clone();
+    let status_toggle = status.clone();
     header.toggle.connect_state_set(move |_switch, state| {
         if guard_toggle.get() {
             return Propagation::Proceed;
         }
 
-        if let Err(err) = nm_toggle.set_wifi_enabled(state) {
-            eprintln!("Failed to set Wi‑Fi: {err:?}");
+        match nm_toggle.set_wifi_enabled(state) {
+            Ok(_) => {
+                let label = if state { "Wi‑Fi enabled" } else { "Wi‑Fi disabled" };
+                status_toggle(StatusKind::Success, label.to_string());
+            }
+            Err(err) => status_toggle(StatusKind::Error, format!("Failed to set Wi‑Fi: {err:?}")),
         }
 
         refresh_ui(
@@ -340,9 +375,15 @@ fn wire_actions(
 
     let nm_details = nm_backend.clone();
     let window_details = parent.clone();
+    let status_details = status.clone();
     list.connect_row_activated(move |_list, row| {
         if let Some(ssid) = ssid_from_row(row) {
-            show_network_details_dialog(&window_details, &ssid, nm_details.clone());
+            show_network_details_dialog(
+                &window_details,
+                &ssid,
+                nm_details.clone(),
+                status_details.clone(),
+            );
         }
     });
 }
@@ -364,6 +405,15 @@ fn refresh_ui(
 
 type ActionHandler = Rc<dyn Fn(RowAction)>;
 
+#[derive(Clone, Copy)]
+enum StatusKind {
+    Info,
+    Success,
+    Error,
+}
+
+type StatusHandler = Rc<dyn Fn(StatusKind, String)>;
+
 enum RowAction {
     Connect(String),
     Disconnect(String),
@@ -376,6 +426,38 @@ fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: Ro
     }
 }
 
+fn build_status_handler(label: &Label) -> StatusHandler {
+    let label = label.clone();
+    Rc::new(move |kind, text| {
+        show_status(&label, kind, &text);
+    })
+}
+
+fn show_status(label: &Label, kind: StatusKind, text: &str) {
+    label.set_text(text);
+    label.set_visible(!text.is_empty());
+    label.remove_css_class("yufi-status-ok");
+    label.remove_css_class("yufi-status-error");
+
+    match kind {
+        StatusKind::Success => label.add_css_class("yufi-status-ok"),
+        StatusKind::Error => label.add_css_class("yufi-status-error"),
+        StatusKind::Info => {}
+    }
+
+    let timeout = match kind {
+        StatusKind::Error => 5000,
+        _ => 3000,
+    };
+
+    let label = label.clone();
+    gtk4::glib::timeout_add_local(Duration::from_millis(timeout), move || {
+        label.set_text("");
+        label.set_visible(false);
+        ControlFlow::Break
+    });
+}
+
 fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
     let name = row.widget_name();
     let name = name.as_str();
@@ -386,6 +468,7 @@ fn show_network_details_dialog(
     parent: &ApplicationWindow,
     ssid: &str,
     backend: Rc<NetworkManagerBackend>,
+    status: StatusHandler,
 ) {
     let dialog = Dialog::with_buttons(
         Some("Network Details"),
@@ -419,6 +502,7 @@ fn show_network_details_dialog(
     let backend_clone = backend.clone();
     let ssid_clone = ssid.to_string();
     let password_entry_clone = password_entry.clone();
+    let status_reveal = status.clone();
     reveal_button.connect_clicked(move |button| {
         if reveal_state_clone.get() {
             password_entry_clone.set_text("");
@@ -438,9 +522,10 @@ fn show_network_details_dialog(
             Ok(None) => {
                 password_entry_clone.set_text("");
                 password_entry_clone.set_visibility(false);
+                status_reveal(StatusKind::Info, "No saved password".to_string());
             }
             Err(err) => {
-                eprintln!("Failed to load password: {err:?}");
+                status_reveal(StatusKind::Error, format!("Failed to load password: {err:?}"));
             }
         }
     });
@@ -494,6 +579,7 @@ fn show_network_details_dialog(
     let dns_entry = dns_entry.clone();
     let auto_switch = auto_switch.clone();
     let ssid = ssid.to_string();
+    let status_save = status.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
             let ip = ip_entry.text().to_string();
@@ -501,11 +587,17 @@ fn show_network_details_dialog(
             let ip_opt = if ip.is_empty() { None } else { Some(ip.as_str()) };
             let dns_opt = if dns.is_empty() { None } else { Some(dns.as_str()) };
 
+            let mut failed = false;
             if let Err(err) = backend.set_ip_dns(&ssid, ip_opt, dns_opt) {
-                eprintln!("Failed to set IP/DNS: {err:?}");
+                failed = true;
+                status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
             }
             if let Err(err) = backend.set_autoreconnect(&ssid, auto_switch.is_active()) {
-                eprintln!("Failed to set auto‑reconnect: {err:?}");
+                failed = true;
+                status_save(StatusKind::Error, format!("Failed to set auto‑reconnect: {err:?}"));
+            }
+            if !failed {
+                status_save(StatusKind::Success, "Saved network settings".to_string());
             }
         }
         dialog.close();
@@ -690,6 +782,23 @@ fn load_css() {
         color: #e6e6e6;
         border-radius: 10px;
         padding: 6px 10px;
+    }
+
+    .yufi-status {
+        font-size: 12px;
+        color: #bfbfbf;
+    }
+
+    .yufi-status-bar {
+        padding: 2px 4px;
+    }
+
+    .yufi-status-ok {
+        color: #9fd49f;
+    }
+
+    .yufi-status-error {
+        color: #f2a3a3;
     }
 
     .yufi-footer {
