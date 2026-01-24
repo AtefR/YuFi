@@ -49,8 +49,11 @@ impl Backend for NetworkManagerBackend {
                 .get_property("Strength")
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-            let is_active =
-                ap_path == active_ap || active_ssid.as_deref().is_some_and(|v| v == ssid);
+            let is_active = if let Some(active) = active_ssid.as_deref() {
+                active == ssid
+            } else {
+                ap_path == active_ap
+            };
             let icon = icon_for_strength(strength);
 
             match best_by_ssid.get(&ssid) {
