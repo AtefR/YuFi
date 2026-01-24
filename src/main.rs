@@ -65,7 +65,8 @@ fn build_ui(app: &Application) {
     let status_handler = build_status_handler(&status_label);
     let list = build_network_list();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
-    populate_network_list(&list, &state, &action_handler);
+    let optimistic_active = Rc::new(RefCell::new(None::<String>));
+    populate_network_list(&list, &state, &action_handler, optimistic_active.borrow().as_deref());
     let status_container = Rc::new(StatusContainer {
         dialog_label: Rc::new(RefCell::new(None)),
     });
@@ -151,6 +152,7 @@ fn build_ui(app: &Application) {
     let window_rx = window.clone();
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
+    let optimistic_active_rx = optimistic_active.clone();
 
     gtk4::glib::timeout_add_local(Duration::from_millis(100), move || {
         while let Ok(event) = ui_rx.borrow().try_recv() {
@@ -168,7 +170,15 @@ fn build_ui(app: &Application) {
                     guard_rx.set(true);
                     toggle_rx.set_active(state.wifi_enabled);
                     guard_rx.set(false);
-                    populate_network_list(&list_rx, &state, &handler_rx);
+                    if state.networks.iter().any(|n| matches!(n.action, NetworkAction::Disconnect)) {
+                        *optimistic_active_rx.borrow_mut() = None;
+                    }
+                    populate_network_list(
+                        &list_rx,
+                        &state,
+                        &handler_rx,
+                        optimistic_active_rx.borrow().as_deref(),
+                    );
                 }
                 UiEvent::ScanDone(result) => {
                     loading_rx.stop();
@@ -205,6 +215,7 @@ fn build_ui(app: &Application) {
                 update_loading_ui(header_rx.as_ref(), &loading_rx);
                 match result {
                     Ok(_) => {
+                        *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
                         status_rx(StatusKind::Success, format!("Connected to {ssid}"));
                         request_state_refresh(&ui_tx_rx);
                         let ui_tx = ui_tx_rx.clone();
@@ -213,8 +224,9 @@ fn build_ui(app: &Application) {
                             ControlFlow::Break
                         });
                     }
-                        Err(err) => {
-                            if !from_password && needs_password(&err) {
+                    Err(err) => {
+                        *optimistic_active_rx.borrow_mut() = None;
+                        if !from_password && needs_password(&err) {
                                 let loading_retry = loading_rx.clone();
                                 let header_retry = header_rx.clone();
                                 let ui_tx_retry = ui_tx_rx.clone();
@@ -252,6 +264,7 @@ fn build_ui(app: &Application) {
                     Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
                     Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
                 }
+                *optimistic_active_rx.borrow_mut() = None;
                 request_state_refresh(&ui_tx_rx);
                 let ui_tx = ui_tx_rx.clone();
                 gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
@@ -263,7 +276,10 @@ fn build_ui(app: &Application) {
                 loading_rx.stop();
                 update_loading_ui(header_rx.as_ref(), &loading_rx);
                 match result {
-                    Ok(_) => status_rx(StatusKind::Success, format!("Connected to {ssid}")),
+                    Ok(_) => {
+                        *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
+                        status_rx(StatusKind::Success, format!("Connected to {ssid}"));
+                    }
                     Err(err) => {
                         status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
                     }
@@ -394,6 +410,7 @@ fn build_network_list() -> ListBox {
 fn build_network_row(
     network: &Network,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+    effective_action: NetworkAction,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("yufi-row");
@@ -422,7 +439,7 @@ fn build_network_row(
 
     container.append(&top);
 
-    match network.action {
+    match effective_action {
         NetworkAction::Connect => {
             let button = Button::with_label("Connect");
             button.add_css_class("yufi-primary");
@@ -458,17 +475,38 @@ fn build_hidden_button() -> Button {
     hidden
 }
 
+fn effective_action_for(
+    state: &AppState,
+    network: &Network,
+    optimistic_active: Option<&str>,
+) -> NetworkAction {
+    if !state.wifi_enabled {
+        return NetworkAction::None;
+    }
+
+    if let Some(active) = optimistic_active {
+        if network.ssid == active {
+            return NetworkAction::Disconnect;
+        }
+        return NetworkAction::Connect;
+    }
+
+    network.action.clone()
+}
+
 fn populate_network_list(
     list: &ListBox,
     state: &AppState,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+    optimistic_active: Option<&str>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
 
     for network in &state.networks {
-        list.append(&build_network_row(network, action_handler));
+        let effective_action = effective_action_for(state, network, optimistic_active);
+        list.append(&build_network_row(network, action_handler, effective_action));
     }
 }
 
