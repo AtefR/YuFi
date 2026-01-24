@@ -50,10 +50,12 @@ fn build_ui(app: &Application) {
     let nm_backend = Rc::new(NetworkManagerBackend::new());
     let mock_backend = Rc::new(MockBackend::new());
     let toggle_guard = Rc::new(Cell::new(false));
+    let loading = LoadingTracker::new();
 
     let state = load_state_with_backend(&nm_backend, &mock_backend);
 
     let header = build_header(&state);
+    let header_ref = Rc::new(header.clone());
     let search = build_search();
     let (status_bar, status_label) = build_status();
     let status_handler = build_status_handler(&status_label);
@@ -86,6 +88,8 @@ fn build_ui(app: &Application) {
         &window,
         &status_handler,
         &status_container,
+        &loading,
+        &header_ref,
     );
 
     let list_action = list.clone();
@@ -97,6 +101,8 @@ fn build_ui(app: &Application) {
     let window_ref = window.clone();
     let status_action = status_handler.clone();
     let status_container_action = status_container.clone();
+    let loading_action = loading.clone();
+    let header_action = header_ref.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
@@ -110,6 +116,8 @@ fn build_ui(app: &Application) {
                 let ssid_clone = ssid.clone();
                 let status_action = status_action.clone();
 
+                loading_action.start();
+                update_loading_ui(&header_action, &loading_action);
                 match nm_action.connect_network(&ssid_clone, None) {
                     Ok(_) => {
                         status_action(StatusKind::Success, format!("Connected to {ssid_clone}"));
@@ -124,6 +132,8 @@ fn build_ui(app: &Application) {
                     }
                     Err(err) => {
                         if needs_password(&err) {
+                            loading_action.stop();
+                            update_loading_ui(&header_action, &loading_action);
                             let nm_action = nm_action.clone();
                             let list_action = list_action.clone();
                             let toggle_action = toggle_action.clone();
@@ -131,15 +141,19 @@ fn build_ui(app: &Application) {
                             let guard_action = guard_action.clone();
                             let handler_ref = handler_ref.clone();
                             let status_action = status_action.clone();
+                            let loading_action = loading_action.clone();
+                            let header_action = header_action.clone();
                             show_password_dialog(
                                 &window_ref,
                                 &ssid,
                                 move |password| {
-                                let Some(password) = password else {
-                                    status_action(StatusKind::Info, "Password required".to_string());
-                                    return;
-                                };
-                                match nm_action.connect_network(&ssid_clone, Some(&password)) {
+                                    let Some(password) = password else {
+                                        status_action(StatusKind::Info, "Password required".to_string());
+                                        return;
+                                    };
+                                    loading_action.start();
+                                    update_loading_ui(&header_action, &loading_action);
+                                    match nm_action.connect_network(&ssid_clone, Some(&password)) {
                                     Ok(_) => status_action(
                                         StatusKind::Success,
                                         format!("Connected to {ssid_clone}"),
@@ -156,6 +170,8 @@ fn build_ui(app: &Application) {
                                         &guard_action,
                                         &handler_ref,
                                     );
+                                    loading_action.stop();
+                                    update_loading_ui(&header_action, &loading_action);
                                 },
                                 (*status_container_action).clone(),
                             );
@@ -165,8 +181,12 @@ fn build_ui(app: &Application) {
                         }
                     }
                 }
+                loading_action.stop();
+                update_loading_ui(&header_action, &loading_action);
             }
             RowAction::Disconnect(ssid) => {
+                loading_action.start();
+                update_loading_ui(&header_action, &loading_action);
                 match nm_action.disconnect_network(&ssid) {
                     Ok(_) => status_action(StatusKind::Success, format!("Disconnected from {ssid}")),
                     Err(err) => {
@@ -182,6 +202,8 @@ fn build_ui(app: &Application) {
                     &guard_action,
                     &handler_ref,
                 );
+                loading_action.stop();
+                update_loading_ui(&header_action, &loading_action);
             }
         }
     }));
@@ -195,6 +217,8 @@ fn build_ui(app: &Application) {
     let hidden_window = window.clone();
     let hidden_status = status_handler.clone();
     let hidden_status_container = status_container.clone();
+    let loading_hidden = loading.clone();
+    let header_hidden = header_ref.clone();
     hidden.connect_clicked(move |_| {
         let nm = hidden_nm.clone();
         let list = hidden_list.clone();
@@ -205,9 +229,13 @@ fn build_ui(app: &Application) {
         let status = hidden_status.clone();
         let status_container = hidden_status_container.clone();
         let status_container_for_dialog = (*status_container).clone();
+        let loading_hidden = loading_hidden.clone();
+        let header_hidden = header_hidden.clone();
         show_hidden_network_dialog(
             &hidden_window,
             move |ssid, password| {
+                loading_hidden.start();
+                update_loading_ui(&header_hidden, &loading_hidden);
                 match nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
                     Ok(_) => status(StatusKind::Success, format!("Connected to {ssid}")),
                     Err(err) => {
@@ -216,6 +244,8 @@ fn build_ui(app: &Application) {
                     }
                 }
                 refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
+                loading_hidden.stop();
+                update_loading_ui(&header_hidden, &loading_hidden);
             },
             status_container_for_dialog,
         );
@@ -225,11 +255,39 @@ fn build_ui(app: &Application) {
     window.present();
 }
 
+#[derive(Clone)]
 struct HeaderWidgets {
     container: GtkBox,
     toggle: Switch,
     refresh: Button,
     spinner: Spinner,
+}
+
+#[derive(Clone)]
+struct LoadingTracker {
+    active: Rc<Cell<u32>>,
+}
+
+impl LoadingTracker {
+    fn new() -> Self {
+        Self {
+            active: Rc::new(Cell::new(0)),
+        }
+    }
+
+    fn start(&self) {
+        let count = self.active.get().saturating_add(1);
+        self.active.set(count);
+    }
+
+    fn stop(&self) {
+        let count = self.active.get();
+        self.active.set(count.saturating_sub(1));
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.get() > 0
+    }
 }
 
 fn build_header(state: &AppState) -> HeaderWidgets {
@@ -261,6 +319,16 @@ fn build_header(state: &AppState) -> HeaderWidgets {
         toggle,
         refresh,
         spinner,
+    }
+}
+
+fn update_loading_ui(header: &HeaderWidgets, loading: &LoadingTracker) {
+    if loading.is_active() {
+        header.spinner.set_visible(true);
+        header.spinner.start();
+    } else {
+        header.spinner.stop();
+        header.spinner.set_visible(false);
     }
 }
 
@@ -385,6 +453,8 @@ fn wire_actions(
     parent: &ApplicationWindow,
     status: &StatusHandler,
     status_container: &StatusContainer,
+    loading: &LoadingTracker,
+    header_ref: &Rc<HeaderWidgets>,
 ) {
     let list_refresh = list.clone();
     let toggle_refresh = header.toggle.clone();
@@ -393,9 +463,13 @@ fn wire_actions(
     let guard_refresh = toggle_guard.clone();
     let handler_refresh = action_handler.clone();
     let status_refresh = status.clone();
-    let spinner_refresh = header.spinner.clone();
-    let refresh_button = header.refresh.clone();
+    let spinner_refresh = header_ref.spinner.clone();
+    let refresh_button = header_ref.refresh.clone();
+    let loading_refresh = loading.clone();
+    let header_refresh = header_ref.clone();
     header.refresh.connect_clicked(move |_| {
+        loading_refresh.start();
+        update_loading_ui(&header_refresh, &loading_refresh);
         spinner_refresh.set_visible(true);
         spinner_refresh.start();
         refresh_button.set_sensitive(false);
@@ -420,6 +494,8 @@ fn wire_actions(
         let handler_refresh = handler_refresh.clone();
         let spinner_refresh = spinner_refresh.clone();
         let refresh_button = refresh_button.clone();
+        let loading_refresh = loading_refresh.clone();
+        let header_refresh = header_refresh.clone();
         gtk4::glib::timeout_add_local(Duration::from_millis(2000), move || {
             refresh_ui(
                 &list_refresh,
@@ -432,6 +508,8 @@ fn wire_actions(
             spinner_refresh.stop();
             spinner_refresh.set_visible(false);
             refresh_button.set_sensitive(true);
+            loading_refresh.stop();
+            update_loading_ui(&header_refresh, &loading_refresh);
             ControlFlow::Break
         });
     });
