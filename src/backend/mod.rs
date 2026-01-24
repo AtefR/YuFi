@@ -25,8 +25,14 @@ pub trait Backend {
         password: Option<&str>,
     ) -> BackendResult<()>;
     fn get_network_details(&self, ssid: &str) -> BackendResult<NetworkDetails>;
-    fn set_ip_dns(&self, ssid: &str, ip: Option<&str>, dns: Option<&str>)
-        -> BackendResult<()>;
+    fn set_ip_dns(
+        &self,
+        ssid: &str,
+        ip: Option<&str>,
+        prefix: Option<u32>,
+        gateway: Option<&str>,
+        dns: Option<Vec<String>>,
+    ) -> BackendResult<()>;
     fn get_saved_password(&self, ssid: &str) -> BackendResult<Option<String>>;
     fn set_autoreconnect(&self, ssid: &str, enabled: bool) -> BackendResult<()>;
 }

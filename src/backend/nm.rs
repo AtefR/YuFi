@@ -239,13 +239,17 @@ impl Backend for NetworkManagerBackend {
         if let Some(ipv4) = settings_map.get("ipv4") {
             if let Some(value) = ipv4.get("address-data") {
                 if let Some((addr, prefix)) = first_address_from_value(value) {
-                    details.ip_address = Some(format!("{addr}/{prefix}"));
+                    details.ip_address = Some(addr);
+                    details.prefix = Some(prefix);
+                }
+            }
+            if let Some(value) = ipv4.get("gateway") {
+                if let Ok(gateway) = owned_value_to_string(value) {
+                    details.gateway = Some(gateway);
                 }
             }
             if let Some(value) = ipv4.get("dns-data") {
-                if let Some(dns) = first_dns_from_value(value) {
-                    details.dns_server = Some(dns);
-                }
+                details.dns_servers = dns_from_value(value);
             }
         }
 
@@ -256,9 +260,11 @@ impl Backend for NetworkManagerBackend {
         &self,
         ssid: &str,
         ip: Option<&str>,
-        dns: Option<&str>,
+        prefix: Option<u32>,
+        gateway: Option<&str>,
+        dns: Option<Vec<String>>,
     ) -> BackendResult<()> {
-        if ip.is_none() && dns.is_none() {
+        if ip.is_none() && dns.is_none() && gateway.is_none() {
             return Ok(());
         }
 
@@ -272,25 +278,44 @@ impl Backend for NetworkManagerBackend {
             .entry("ipv4".to_string())
             .or_insert_with(HashMap::new);
 
+        let mut set_manual = false;
+
         if let Some(ip) = ip {
-            let (address, prefix) = parse_ip_prefix(ip);
+            let (address, default_prefix) = parse_ip_prefix(ip);
+            let prefix = prefix.unwrap_or(default_prefix);
             ipv4.insert("method".to_string(), ov_str("manual"));
             let mut addr = HashMap::new();
             addr.insert("address".to_string(), ov_str(&address));
             addr.insert("prefix".to_string(), OwnedValue::from(prefix));
             let address_data = vec![addr];
-            ipv4.insert(
-                "address-data".to_string(),
-                ov_array_dict(address_data)?,
-            );
+            ipv4.insert("address-data".to_string(), ov_array_dict(address_data)?);
+            set_manual = true;
         }
 
-        if let Some(dns) = dns {
-            let mut dns_entry = HashMap::new();
-            dns_entry.insert("address".to_string(), ov_str(dns));
-            let dns_data = vec![dns_entry];
-            ipv4.insert("dns-data".to_string(), ov_array_dict(dns_data)?);
-            ipv4.insert("ignore-auto-dns".to_string(), OwnedValue::from(true));
+        if let Some(gateway) = gateway {
+            ipv4.insert("gateway".to_string(), ov_str(gateway));
+            set_manual = true;
+        }
+
+        if let Some(dns_list) = dns {
+            let mut dns_data = Vec::new();
+            for dns in dns_list {
+                if dns.trim().is_empty() {
+                    continue;
+                }
+                let mut dns_entry = HashMap::new();
+                dns_entry.insert("address".to_string(), ov_str(dns.trim()));
+                dns_data.push(dns_entry);
+            }
+            if !dns_data.is_empty() {
+                ipv4.insert("dns-data".to_string(), ov_array_dict(dns_data)?);
+                ipv4.insert("ignore-auto-dns".to_string(), OwnedValue::from(true));
+                set_manual = true;
+            }
+        }
+
+        if set_manual {
+            ipv4.insert("method".to_string(), ov_str("manual"));
         }
 
         update_connection(&conn, &connection_path, settings_map)
@@ -486,11 +511,14 @@ fn first_address_from_value(value: &OwnedValue) -> Option<(String, u32)> {
     Some((addr, pre))
 }
 
-fn first_dns_from_value(value: &OwnedValue) -> Option<String> {
-    let dicts = value_to_vec_dict(value)?;
-    let first = dicts.into_iter().next()?;
-    let address = first.get("address")?;
-    owned_value_to_string(address).ok()
+fn dns_from_value(value: &OwnedValue) -> Vec<String> {
+    let Some(dicts) = value_to_vec_dict(value) else {
+        return Vec::new();
+    };
+    dicts
+        .into_iter()
+        .filter_map(|dict| dict.get("address").and_then(|v| owned_value_to_string(v).ok()))
+        .collect()
 }
 
 fn parse_ip_prefix(input: &str) -> (String, u32) {

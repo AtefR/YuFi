@@ -90,7 +90,9 @@ impl Backend for MockBackend {
         &self,
         _ssid: &str,
         _ip: Option<&str>,
-        _dns: Option<&str>,
+        _prefix: Option<u32>,
+        _gateway: Option<&str>,
+        _dns: Option<Vec<String>>,
     ) -> BackendResult<()> {
         Ok(())
     }

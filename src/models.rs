@@ -23,6 +23,8 @@ pub struct AppState {
 #[derive(Clone, Debug, Default)]
 pub struct NetworkDetails {
     pub ip_address: Option<String>,
-    pub dns_server: Option<String>,
+    pub prefix: Option<u32>,
+    pub gateway: Option<String>,
+    pub dns_servers: Vec<String>,
     pub auto_reconnect: Option<bool>,
 }

@@ -458,6 +458,31 @@ fn show_status(label: &Label, kind: StatusKind, text: &str) {
     });
 }
 
+fn parse_ip_input<'a>(ip: &'a str, prefix: &'a str) -> (Option<&'a str>, Option<u32>) {
+    let ip = ip.trim();
+    if ip.is_empty() {
+        return (None, None);
+    }
+
+    if !prefix.trim().is_empty() {
+        let prefix = prefix.trim().parse::<u32>().ok();
+        return (Some(ip), prefix.or(Some(24)));
+    }
+
+    if let Some((addr, pre)) = ip.split_once('/') {
+        if let Ok(prefix) = pre.trim().parse::<u32>() {
+            let addr = addr.trim();
+            return if addr.is_empty() {
+                (None, Some(prefix))
+            } else {
+                (Some(addr), Some(prefix))
+            };
+        }
+    }
+
+    (Some(ip), Some(24))
+}
+
 fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
     let name = row.widget_name();
     let name = name.as_str();
@@ -538,10 +563,20 @@ fn show_network_details_dialog(
     let ip_entry = Entry::new();
     ip_entry.set_placeholder_text(Some("e.g. 192.168.1.124"));
 
-    let dns_label = Label::new(Some("DNS Server"));
+    let prefix_label = Label::new(Some("Prefix"));
+    prefix_label.set_halign(Align::Start);
+    let prefix_entry = Entry::new();
+    prefix_entry.set_placeholder_text(Some("e.g. 24"));
+
+    let gateway_label = Label::new(Some("Gateway"));
+    gateway_label.set_halign(Align::Start);
+    let gateway_entry = Entry::new();
+    gateway_entry.set_placeholder_text(Some("e.g. 192.168.1.1"));
+
+    let dns_label = Label::new(Some("DNS Servers"));
     dns_label.set_halign(Align::Start);
     let dns_entry = Entry::new();
-    dns_entry.set_placeholder_text(Some("e.g. 1.1.1.1"));
+    dns_entry.set_placeholder_text(Some("e.g. 1.1.1.1, 8.8.8.8"));
 
     let auto_row = GtkBox::new(Orientation::Horizontal, 8);
     let auto_label = Label::new(Some("Auto‑reconnect"));
@@ -556,6 +591,10 @@ fn show_network_details_dialog(
     box_.append(&password_row);
     box_.append(&ip_label);
     box_.append(&ip_entry);
+    box_.append(&prefix_label);
+    box_.append(&prefix_entry);
+    box_.append(&gateway_label);
+    box_.append(&gateway_entry);
     box_.append(&dns_label);
     box_.append(&dns_entry);
     box_.append(&auto_row);
@@ -568,27 +607,49 @@ fn show_network_details_dialog(
     if let Some(ip) = details.ip_address {
         ip_entry.set_text(&ip);
     }
-    if let Some(dns) = details.dns_server {
-        dns_entry.set_text(&dns);
+    if let Some(prefix) = details.prefix {
+        prefix_entry.set_text(&prefix.to_string());
+    }
+    if let Some(gateway) = details.gateway {
+        gateway_entry.set_text(&gateway);
+    }
+    if !details.dns_servers.is_empty() {
+        dns_entry.set_text(&details.dns_servers.join(", "));
     }
     if let Some(auto) = details.auto_reconnect {
         auto_switch.set_active(auto);
     }
 
     let ip_entry = ip_entry.clone();
+    let prefix_entry = prefix_entry.clone();
+    let gateway_entry = gateway_entry.clone();
     let dns_entry = dns_entry.clone();
     let auto_switch = auto_switch.clone();
     let ssid = ssid.to_string();
     let status_save = status.clone();
     dialog.connect_response(move |dialog, response| {
         if response == ResponseType::Accept {
-            let ip = ip_entry.text().to_string();
-            let dns = dns_entry.text().to_string();
-            let ip_opt = if ip.is_empty() { None } else { Some(ip.as_str()) };
-            let dns_opt = if dns.is_empty() { None } else { Some(dns.as_str()) };
+            let ip_text = ip_entry.text().to_string();
+            let prefix_text = prefix_entry.text().to_string();
+            let gateway_text = gateway_entry.text().to_string();
+            let dns_text = dns_entry.text().to_string();
+
+            let (ip_opt, prefix_opt) = parse_ip_input(&ip_text, &prefix_text);
+            let gateway_opt = if gateway_text.is_empty() {
+                None
+            } else {
+                Some(gateway_text.as_str())
+            };
+
+            let dns_list = dns_text
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>();
+            let dns_opt = if dns_list.is_empty() { None } else { Some(dns_list) };
 
             let mut failed = false;
-            if let Err(err) = backend.set_ip_dns(&ssid, ip_opt, dns_opt) {
+            if let Err(err) = backend.set_ip_dns(&ssid, ip_opt, prefix_opt, gateway_opt, dns_opt) {
                 failed = true;
                 status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
             }
