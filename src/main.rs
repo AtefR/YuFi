@@ -15,7 +15,9 @@ use gtk4::{
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::time::Duration;
+use std::thread;
 
 fn main() {
     let app = Application::builder()
@@ -28,6 +30,8 @@ fn main() {
 
 fn build_ui(app: &Application) {
     load_css();
+
+    let (ui_tx, ui_rx) = mpsc::channel::<UiEvent>();
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -82,173 +86,183 @@ fn build_ui(app: &Application) {
         &header,
         &list,
         &nm_backend,
-        &mock_backend,
         &toggle_guard,
-        &action_handler,
         &window,
         &status_handler,
         &status_container,
         &loading,
         &header_ref,
+        &ui_tx,
     );
 
-    let list_action = list.clone();
-    let toggle_action = header.toggle.clone();
-    let nm_action = nm_backend.clone();
-    let mock_action = mock_backend.clone();
-    let guard_action = toggle_guard.clone();
-    let handler_ref = action_handler.clone();
-    let window_ref = window.clone();
-    let status_action = status_handler.clone();
-    let status_container_action = status_container.clone();
     let loading_action = loading.clone();
     let header_action = header_ref.clone();
+    let ui_tx_action = ui_tx.clone();
 
     *action_handler.borrow_mut() = Some(Rc::new(move |action| {
         match action {
             RowAction::Connect(ssid) => {
-                let nm_action = nm_action.clone();
-                let list_action = list_action.clone();
-                let toggle_action = toggle_action.clone();
-                let mock_action = mock_action.clone();
-                let guard_action = guard_action.clone();
-                let handler_ref = handler_ref.clone();
                 let ssid_clone = ssid.clone();
-                let status_action = status_action.clone();
-
                 loading_action.start();
-                update_loading_ui(&header_action, &loading_action);
-                match nm_action.connect_network(&ssid_clone, None) {
-                    Ok(_) => {
-                        status_action(StatusKind::Success, format!("Connected to {ssid_clone}"));
-                        refresh_ui(
-                            &list_action,
-                            &toggle_action,
-                            &nm_action,
-                            &mock_action,
-                            &guard_action,
-                            &handler_ref,
-                        );
-                    }
-                    Err(err) => {
-                        if needs_password(&err) {
-                            loading_action.stop();
-                            update_loading_ui(&header_action, &loading_action);
-                            let nm_action = nm_action.clone();
-                            let list_action = list_action.clone();
-                            let toggle_action = toggle_action.clone();
-                            let mock_action = mock_action.clone();
-                            let guard_action = guard_action.clone();
-                            let handler_ref = handler_ref.clone();
-                            let status_action = status_action.clone();
-                            let loading_action = loading_action.clone();
-                            let header_action = header_action.clone();
-                            show_password_dialog(
-                                &window_ref,
-                                &ssid,
-                                move |password| {
-                                    let Some(password) = password else {
-                                        status_action(StatusKind::Info, "Password required".to_string());
-                                        return;
-                                    };
-                                    loading_action.start();
-                                    update_loading_ui(&header_action, &loading_action);
-                                    match nm_action.connect_network(&ssid_clone, Some(&password)) {
-                                    Ok(_) => status_action(
-                                        StatusKind::Success,
-                                        format!("Connected to {ssid_clone}"),
-                                    ),
-                                    Err(err) => {
-                                        status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
-                                    }
-                                }
-                                    refresh_ui(
-                                        &list_action,
-                                        &toggle_action,
-                                        &nm_action,
-                                        &mock_action,
-                                        &guard_action,
-                                        &handler_ref,
-                                    );
-                                    loading_action.stop();
-                                    update_loading_ui(&header_action, &loading_action);
-                                },
-                                (*status_container_action).clone(),
-                            );
-                        } else {
-                            status_action(StatusKind::Error, format!("Connect failed: {err:?}"));
-                            status_container_action.show_dialog_error(format!("{err:?}"));
-                        }
-                    }
-                }
-                loading_action.stop();
-                update_loading_ui(&header_action, &loading_action);
+                update_loading_ui(header_action.as_ref(), &loading_action);
+                spawn_connect_task(&ui_tx_action, ssid_clone, None, false);
             }
             RowAction::Disconnect(ssid) => {
+                let ssid_clone = ssid.clone();
                 loading_action.start();
-                update_loading_ui(&header_action, &loading_action);
-                match nm_action.disconnect_network(&ssid) {
-                    Ok(_) => status_action(StatusKind::Success, format!("Disconnected from {ssid}")),
-                    Err(err) => {
-                        status_action(StatusKind::Error, format!("Disconnect failed: {err:?}"));
-                        status_container_action.show_dialog_error(format!("{err:?}"));
-                    }
-                }
-                refresh_ui(
-                    &list_action,
-                    &toggle_action,
-                    &nm_action,
-                    &mock_action,
-                    &guard_action,
-                    &handler_ref,
-                );
-                loading_action.stop();
-                update_loading_ui(&header_action, &loading_action);
+                update_loading_ui(header_action.as_ref(), &loading_action);
+                spawn_disconnect_task(&ui_tx_action, ssid_clone);
             }
         }
     }));
 
-    let hidden_nm = nm_backend.clone();
-    let hidden_mock = mock_backend.clone();
-    let hidden_list = list.clone();
-    let hidden_toggle = header.toggle.clone();
-    let hidden_guard = toggle_guard.clone();
-    let hidden_handler = action_handler.clone();
     let hidden_window = window.clone();
-    let hidden_status = status_handler.clone();
-    let hidden_status_container = status_container.clone();
     let loading_hidden = loading.clone();
     let header_hidden = header_ref.clone();
+    let ui_tx_hidden = ui_tx.clone();
+    let status_container_action = status_container.clone();
     hidden.connect_clicked(move |_| {
-        let nm = hidden_nm.clone();
-        let list = hidden_list.clone();
-        let toggle = hidden_toggle.clone();
-        let mock = hidden_mock.clone();
-        let guard = hidden_guard.clone();
-        let handler = hidden_handler.clone();
-        let status = hidden_status.clone();
-        let status_container = hidden_status_container.clone();
-        let status_container_for_dialog = (*status_container).clone();
         let loading_hidden = loading_hidden.clone();
         let header_hidden = header_hidden.clone();
+        let status_container_dialog = status_container_action.clone();
+        let ui_tx_hidden = ui_tx_hidden.clone();
         show_hidden_network_dialog(
             &hidden_window,
             move |ssid, password| {
                 loading_hidden.start();
-                update_loading_ui(&header_hidden, &loading_hidden);
-                match nm.connect_hidden(&ssid, "wpa-psk", password.as_deref()) {
-                    Ok(_) => status(StatusKind::Success, format!("Connected to {ssid}")),
-                    Err(err) => {
-                        status(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
-                        status_container.show_dialog_error(format!("{err:?}"));
+                update_loading_ui(header_hidden.as_ref(), &loading_hidden);
+                spawn_hidden_task(&ui_tx_hidden, ssid, password);
+            },
+            (*status_container_dialog).clone(),
+        );
+    });
+
+    let list_rx = list.clone();
+    let toggle_rx = header.toggle.clone();
+    let guard_rx = toggle_guard.clone();
+    let handler_rx = action_handler.clone();
+    let status_rx = status_handler.clone();
+    let status_container_rx = status_container.clone();
+    let loading_rx = loading.clone();
+    let header_rx = header_ref.clone();
+    let refresh_button_rx = header.refresh.clone();
+    let spinner_rx = header.spinner.clone();
+    let mock_rx = mock_backend.clone();
+    let window_rx = window.clone();
+    let ui_tx_rx = ui_tx.clone();
+    let ui_rx = Rc::new(RefCell::new(ui_rx));
+
+    gtk4::glib::timeout_add_local(Duration::from_millis(100), move || {
+        while let Ok(event) = ui_rx.borrow().try_recv() {
+            match event {
+                UiEvent::StateLoaded(result) => {
+                    let state = match result {
+                        Ok(state) => state,
+                        Err(err) => {
+                            status_rx(StatusKind::Error, format!("NetworkManager error: {err:?}"));
+                            mock_rx
+                                .load_state()
+                                .unwrap_or_else(|_| fallback_state(err))
+                        }
+                    };
+                    guard_rx.set(true);
+                    toggle_rx.set_active(state.wifi_enabled);
+                    guard_rx.set(false);
+                    populate_network_list(&list_rx, &state, &handler_rx);
+                }
+                UiEvent::ScanDone(result) => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    spinner_rx.stop();
+                    spinner_rx.set_visible(false);
+                    refresh_button_rx.set_sensitive(true);
+                    match result {
+                        Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
+                        Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
+                    }
+                    let ui_tx = ui_tx_rx.clone();
+                    gtk4::glib::timeout_add_local(Duration::from_millis(2000), move || {
+                        request_state_refresh(&ui_tx);
+                        ControlFlow::Break
+                    });
+                }
+                UiEvent::WifiSet { enabled, result } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => {
+                            let label = if enabled { "Wi‑Fi enabled" } else { "Wi‑Fi disabled" };
+                            status_rx(StatusKind::Success, label.to_string());
+                        }
+                        Err(err) => {
+                            status_rx(StatusKind::Error, format!("Failed to set Wi‑Fi: {err:?}"));
+                        }
+                    }
+                    request_state_refresh(&ui_tx_rx);
+                }
+                UiEvent::ConnectDone { ssid, result, from_password } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => {
+                            status_rx(StatusKind::Success, format!("Connected to {ssid}"));
+                            request_state_refresh(&ui_tx_rx);
+                        }
+                        Err(err) => {
+                            if !from_password && needs_password(&err) {
+                                let loading_retry = loading_rx.clone();
+                                let header_retry = header_rx.clone();
+                                let ui_tx_retry = ui_tx_rx.clone();
+                                let ssid_retry = ssid.clone();
+                                let status_container_retry = status_container_rx.clone();
+                                show_password_dialog(
+                                    &window_rx,
+                                    &ssid,
+                                    move |password| {
+                                        let Some(password) = password else { return; };
+                                        loading_retry.start();
+                                        update_loading_ui(header_retry.as_ref(), &loading_retry);
+                                        spawn_connect_task(
+                                            &ui_tx_retry,
+                                            ssid_retry.clone(),
+                                            Some(password),
+                                            true,
+                                        );
+                                    },
+                                    (*status_container_retry).clone(),
+                                );
+                            } else {
+                                status_rx(StatusKind::Error, format!("Connect failed: {err:?}"));
+                                if from_password {
+                                    status_container_rx.show_dialog_error(format!("{err:?}"));
+                                }
+                            }
+                        }
                     }
                 }
-                refresh_ui(&list, &toggle, &nm, &mock, &guard, &handler);
-                loading_hidden.stop();
-                update_loading_ui(&header_hidden, &loading_hidden);
-            },
-            status_container_for_dialog,
-        );
+                UiEvent::DisconnectDone { ssid, result } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
+                        Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
+                    }
+                    request_state_refresh(&ui_tx_rx);
+                }
+                UiEvent::HiddenDone { ssid, result } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => status_rx(StatusKind::Success, format!("Connected to {ssid}")),
+                        Err(err) => {
+                            status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
+                        }
+                    }
+                    request_state_refresh(&ui_tx_rx);
+                }
+            }
+        }
+        ControlFlow::Continue
     });
 
     window.set_child(Some(&root));
@@ -447,101 +461,42 @@ fn wire_actions(
     header: &HeaderWidgets,
     list: &ListBox,
     nm_backend: &Rc<NetworkManagerBackend>,
-    mock_backend: &Rc<MockBackend>,
     toggle_guard: &Rc<Cell<bool>>,
-    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
     parent: &ApplicationWindow,
     status: &StatusHandler,
     status_container: &StatusContainer,
     loading: &LoadingTracker,
     header_ref: &Rc<HeaderWidgets>,
+    ui_tx: &mpsc::Sender<UiEvent>,
 ) {
-    let list_refresh = list.clone();
-    let toggle_refresh = header.toggle.clone();
-    let nm_refresh = nm_backend.clone();
-    let mock_refresh = mock_backend.clone();
-    let guard_refresh = toggle_guard.clone();
-    let handler_refresh = action_handler.clone();
     let status_refresh = status.clone();
     let spinner_refresh = header_ref.spinner.clone();
     let refresh_button = header_ref.refresh.clone();
     let loading_refresh = loading.clone();
     let header_refresh = header_ref.clone();
+    let ui_tx_refresh = ui_tx.clone();
     header.refresh.connect_clicked(move |_| {
         loading_refresh.start();
-        update_loading_ui(&header_refresh, &loading_refresh);
+        update_loading_ui(header_refresh.as_ref(), &loading_refresh);
         spinner_refresh.set_visible(true);
         spinner_refresh.start();
         refresh_button.set_sensitive(false);
-        match nm_refresh.request_scan() {
-            Ok(_) => status_refresh(StatusKind::Info, "Scan requested".to_string()),
-            Err(err) => status_refresh(StatusKind::Error, format!("Scan failed: {err:?}")),
-        }
-        refresh_ui(
-            &list_refresh,
-            &toggle_refresh,
-            &nm_refresh,
-            &mock_refresh,
-            &guard_refresh,
-            &handler_refresh,
-        );
-
-        let list_refresh = list_refresh.clone();
-        let toggle_refresh = toggle_refresh.clone();
-        let nm_refresh = nm_refresh.clone();
-        let mock_refresh = mock_refresh.clone();
-        let guard_refresh = guard_refresh.clone();
-        let handler_refresh = handler_refresh.clone();
-        let spinner_refresh = spinner_refresh.clone();
-        let refresh_button = refresh_button.clone();
-        let loading_refresh = loading_refresh.clone();
-        let header_refresh = header_refresh.clone();
-        gtk4::glib::timeout_add_local(Duration::from_millis(2000), move || {
-            refresh_ui(
-                &list_refresh,
-                &toggle_refresh,
-                &nm_refresh,
-                &mock_refresh,
-                &guard_refresh,
-                &handler_refresh,
-            );
-            spinner_refresh.stop();
-            spinner_refresh.set_visible(false);
-            refresh_button.set_sensitive(true);
-            loading_refresh.stop();
-            update_loading_ui(&header_refresh, &loading_refresh);
-            ControlFlow::Break
-        });
+        status_refresh(StatusKind::Info, "Scan requested".to_string());
+        spawn_scan_task(&ui_tx_refresh);
     });
 
-    let list_toggle = list.clone();
-    let toggle_toggle = header.toggle.clone();
-    let nm_toggle = nm_backend.clone();
-    let mock_toggle = mock_backend.clone();
     let guard_toggle = toggle_guard.clone();
-    let handler_toggle = action_handler.clone();
-    let status_toggle = status.clone();
+    let loading_toggle = loading.clone();
+    let header_toggle = header_ref.clone();
+    let ui_tx_toggle = ui_tx.clone();
     header.toggle.connect_state_set(move |_switch, state| {
         if guard_toggle.get() {
             return Propagation::Proceed;
         }
 
-        match nm_toggle.set_wifi_enabled(state) {
-            Ok(_) => {
-                let label = if state { "Wi‑Fi enabled" } else { "Wi‑Fi disabled" };
-                status_toggle(StatusKind::Success, label.to_string());
-            }
-            Err(err) => status_toggle(StatusKind::Error, format!("Failed to set Wi‑Fi: {err:?}")),
-        }
-
-        refresh_ui(
-            &list_toggle,
-            &toggle_toggle,
-            &nm_toggle,
-            &mock_toggle,
-            &guard_toggle,
-            &handler_toggle,
-        );
+        loading_toggle.start();
+        update_loading_ui(header_toggle.as_ref(), &loading_toggle);
+        spawn_toggle_task(&ui_tx_toggle, state);
         Propagation::Proceed
     });
 
@@ -562,21 +517,6 @@ fn wire_actions(
     });
 }
 
-fn refresh_ui(
-    list: &ListBox,
-    toggle: &Switch,
-    nm_backend: &NetworkManagerBackend,
-    mock_backend: &MockBackend,
-    toggle_guard: &Cell<bool>,
-    action_handler: &Rc<RefCell<Option<ActionHandler>>>,
-) {
-    let state = load_state_with_backend(nm_backend, mock_backend);
-    toggle_guard.set(true);
-    toggle.set_active(state.wifi_enabled);
-    toggle_guard.set(false);
-    populate_network_list(list, &state, action_handler);
-}
-
 type ActionHandler = Rc<dyn Fn(RowAction)>;
 
 #[derive(Clone, Copy)]
@@ -587,6 +527,28 @@ enum StatusKind {
 }
 
 type StatusHandler = Rc<dyn Fn(StatusKind, String)>;
+
+enum UiEvent {
+    StateLoaded(Result<AppState, BackendError>),
+    ScanDone(Result<(), BackendError>),
+    WifiSet {
+        enabled: bool,
+        result: Result<(), BackendError>,
+    },
+    ConnectDone {
+        ssid: String,
+        result: Result<(), BackendError>,
+        from_password: bool,
+    },
+    DisconnectDone {
+        ssid: String,
+        result: Result<(), BackendError>,
+    },
+    HiddenDone {
+        ssid: String,
+        result: Result<(), BackendError>,
+    },
+}
 
 enum RowAction {
     Connect(String),
@@ -651,6 +613,78 @@ fn show_status(label: &Label, kind: StatusKind, text: &str) {
         label.set_text("");
         label.set_visible(false);
         ControlFlow::Break
+    });
+}
+
+fn spawn_task<F>(ui_tx: &mpsc::Sender<UiEvent>, task: F)
+where
+    F: FnOnce() -> UiEvent + Send + 'static,
+{
+    let tx = ui_tx.clone();
+    thread::spawn(move || {
+        let event = task();
+        let _ = tx.send(event);
+    });
+}
+
+fn request_state_refresh(ui_tx: &mpsc::Sender<UiEvent>) {
+    spawn_task(ui_tx, || {
+        let backend = NetworkManagerBackend::new();
+        UiEvent::StateLoaded(backend.load_state())
+    });
+}
+
+fn spawn_scan_task(ui_tx: &mpsc::Sender<UiEvent>) {
+    spawn_task(ui_tx, || {
+        let backend = NetworkManagerBackend::new();
+        UiEvent::ScanDone(backend.request_scan())
+    });
+}
+
+fn spawn_toggle_task(ui_tx: &mpsc::Sender<UiEvent>, enabled: bool) {
+    spawn_task(ui_tx, move || {
+        let backend = NetworkManagerBackend::new();
+        UiEvent::WifiSet {
+            enabled,
+            result: backend.set_wifi_enabled(enabled),
+        }
+    });
+}
+
+fn spawn_connect_task(
+    ui_tx: &mpsc::Sender<UiEvent>,
+    ssid: String,
+    password: Option<String>,
+    from_password: bool,
+) {
+    spawn_task(ui_tx, move || {
+        let backend = NetworkManagerBackend::new();
+        let result = backend.connect_network(&ssid, password.as_deref());
+        UiEvent::ConnectDone {
+            ssid,
+            result,
+            from_password,
+        }
+    });
+}
+
+fn spawn_disconnect_task(ui_tx: &mpsc::Sender<UiEvent>, ssid: String) {
+    spawn_task(ui_tx, move || {
+        let backend = NetworkManagerBackend::new();
+        let result = backend.disconnect_network(&ssid);
+        UiEvent::DisconnectDone { ssid, result }
+    });
+}
+
+fn spawn_hidden_task(
+    ui_tx: &mpsc::Sender<UiEvent>,
+    ssid: String,
+    password: Option<String>,
+) {
+    spawn_task(ui_tx, move || {
+        let backend = NetworkManagerBackend::new();
+        let result = backend.connect_hidden(&ssid, "wpa-psk", password.as_deref());
+        UiEvent::HiddenDone { ssid, result }
     });
 }
 
