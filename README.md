@@ -27,7 +27,7 @@ cargo run
 ## Packaging (draft)
 - Desktop entry: `com.yufi.app.desktop`
 - Icon: `com.yufi.app.svg`
-- Flatpak: recommended for distribution
+- Flatpak: `packaging/com.yufi.app.yml`
 - AppImage: optional for portable builds
 
 ## Notes

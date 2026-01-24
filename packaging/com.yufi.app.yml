@@ -1,0 +1,21 @@
+app-id: com.yufi.app
+runtime: org.gnome.Platform
+runtime-version: "46"
+sdk: org.gnome.Sdk
+command: yufi
+finish-args:
+  - --share=network
+  - --socket=system-bus
+  - --talk-name=org.freedesktop.NetworkManager
+  - --filesystem=xdg-run/NetworkManager:ro
+modules:
+  - name: yufi
+    buildsystem: simple
+    build-commands:
+      - cargo build --release
+      - install -Dm755 target/release/yufi /app/bin/yufi
+      - install -Dm644 packaging/com.yufi.app.desktop /app/share/applications/com.yufi.app.desktop
+      - install -Dm644 packaging/com.yufi.app.svg /app/share/icons/hicolor/scalable/apps/com.yufi.app.svg
+    sources:
+      - type: dir
+        path: ..
