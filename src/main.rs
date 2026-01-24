@@ -10,7 +10,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
     Label, ListBox, ListBoxRow, MessageDialog, MessageType, Orientation, Overlay, ResponseType,
-    SearchEntry, Spinner, Switch,
+    ScrolledWindow, SearchEntry, Spinner, Switch,
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
@@ -67,6 +67,10 @@ fn build_ui(app: &Application) {
     let header_ref = Rc::new(header.clone());
     let search = build_search();
     let list = build_network_list();
+    let list_scroller = ScrolledWindow::new();
+    list_scroller.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    list_scroller.set_vexpand(true);
+    list_scroller.set_child(Some(&list));
     let legend = build_lock_legend();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
@@ -100,7 +104,7 @@ fn build_ui(app: &Application) {
     panel.append(&header.container);
     panel.append(&search);
     panel.append(&status_bar);
-    panel.append(&list);
+    panel.append(&list_scroller);
     panel.append(&legend);
     panel.append(&spacer);
     panel.append(&hidden);
@@ -777,6 +781,11 @@ fn build_lock_legend() -> GtkBox {
     legend.add_css_class("yufi-legend");
     legend.set_halign(Align::Start);
 
+    let saved_dot = GtkBox::new(Orientation::Horizontal, 0);
+    saved_dot.add_css_class("yufi-saved-dot");
+    let saved_label = Label::new(Some("Saved"));
+    saved_label.add_css_class("yufi-legend-label");
+
     let secure_icon = Image::from_icon_name("changes-prevent-symbolic");
     secure_icon.add_css_class("yufi-network-lock");
     let secure_label = Label::new(Some("Secure"));
@@ -787,6 +796,8 @@ fn build_lock_legend() -> GtkBox {
     let open_label = Label::new(Some("Open"));
     open_label.add_css_class("yufi-legend-label");
 
+    legend.append(&saved_dot);
+    legend.append(&saved_label);
     legend.append(&secure_icon);
     legend.append(&secure_label);
     legend.append(&open_icon);
