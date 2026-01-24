@@ -2,7 +2,6 @@ mod backend;
 mod models;
 
 use backend::{Backend, BackendError};
-use backend::mock::MockBackend;
 use backend::nm::NetworkManagerBackend;
 use gtk4::gdk::Display;
 use gtk4::glib::ControlFlow;
@@ -56,18 +55,17 @@ fn build_ui(app: &Application) {
     panel.add_css_class("yufi-panel");
 
     let nm_backend = Rc::new(NetworkManagerBackend::new());
-    let mock_backend = Rc::new(MockBackend::new());
     let toggle_guard = Rc::new(Cell::new(false));
     let loading = LoadingTracker::new();
 
-    let state = load_state_with_backend(&nm_backend, &mock_backend);
+    let (status_bar, status_label) = build_status();
+    let status_handler = build_status_handler(&status_label);
+    let state = load_state_with_backend(&nm_backend, &status_handler);
     let state_cache = Rc::new(RefCell::new(state.clone()));
 
     let header = build_header(&state);
     let header_ref = Rc::new(header.clone());
     let search = build_search();
-    let (status_bar, status_label) = build_status();
-    let status_handler = build_status_handler(&status_label);
     let list = build_network_list();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
@@ -198,7 +196,6 @@ fn build_ui(app: &Application) {
     let refresh_button_rx = header.refresh.clone();
     let spinner_rx = header.spinner.clone();
     let refresh_stack_rx = header.refresh_stack.clone();
-    let mock_rx = mock_backend.clone();
     let window_rx = window.clone();
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
@@ -219,9 +216,7 @@ fn build_ui(app: &Application) {
                         Ok(state) => state,
                         Err(err) => {
                             status_rx(StatusKind::Error, format!("NetworkManager error: {err:?}"));
-                            mock_rx
-                                .load_state()
-                                .unwrap_or_else(|_| fallback_state(err))
+                            fallback_state(err)
                         }
                     };
                     guard_rx.set(true);
@@ -1648,15 +1643,13 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
 
 fn load_state_with_backend(
     nm_backend: &NetworkManagerBackend,
-    mock_backend: &MockBackend,
+    status: &StatusHandler,
 ) -> AppState {
     match nm_backend.load_state() {
         Ok(state) => state,
         Err(err) => {
-            eprintln!("NetworkManager backend unavailable: {err:?}. Falling back to mock data.");
-            mock_backend
-                .load_state()
-                .unwrap_or_else(|_| fallback_state(err))
+            status(StatusKind::Error, format!("NetworkManager error: {err:?}"));
+            fallback_state(err)
         }
     }
 }

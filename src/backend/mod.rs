@@ -1,4 +1,3 @@
-pub mod mock;
 pub mod nm;
 
 use crate::models::{AppState, NetworkDetails};
