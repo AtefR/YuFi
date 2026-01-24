@@ -27,7 +27,7 @@ impl Backend for NetworkManagerBackend {
         let active_ap: OwnedObjectPath = wireless
             .get_property("ActiveAccessPoint")
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
-        let active_ssid = active_ssid_for_device(&conn, &wifi_device)?;
+        let active_specific_ap = active_specific_ap_for_device(&conn, &wifi_device)?;
 
         let ap_paths: Vec<OwnedObjectPath> = wireless
             .call("GetAccessPoints", &())
@@ -49,10 +49,12 @@ impl Backend for NetworkManagerBackend {
                 .get_property("Strength")
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-            let is_active = if let Some(active) = active_ssid.as_deref() {
-                active == ssid
-            } else {
+            let is_active = if let Some(active_ap) = active_specific_ap.as_ref() {
+                ap_path == *active_ap
+            } else if active_ap.as_str() != "/" {
                 ap_path == active_ap
+            } else {
+                false
             };
             let icon = icon_for_strength(strength);
 
@@ -707,10 +709,10 @@ fn find_active_connection_for_ssid(
     Ok(None)
 }
 
-fn active_ssid_for_device(
+fn active_specific_ap_for_device(
     conn: &Connection,
     device_path: &OwnedObjectPath,
-) -> BackendResult<Option<String>> {
+) -> BackendResult<Option<OwnedObjectPath>> {
     let device = device_proxy(conn, device_path)?;
     let active: OwnedObjectPath = device
         .get_property("ActiveConnection")
@@ -728,27 +730,13 @@ fn active_ssid_for_device(
     )
     .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-    let connection: OwnedObjectPath = active_proxy
-        .get_property("Connection")
+    let specific: OwnedObjectPath = active_proxy
+        .get_property("SpecificObject")
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-    let settings_map = connection_settings(conn, &connection)?;
-
-    if let Some(wireless) = settings_map.get("802-11-wireless") {
-        if let Some(ssid_value) = wireless.get("ssid") {
-            if let Some(current_ssid) = ssid_from_value(ssid_value) {
-                return Ok(Some(current_ssid));
-            }
-        }
+    if specific.as_str() == "/" {
+        Ok(None)
+    } else {
+        Ok(Some(specific))
     }
-
-    if let Some(connection) = settings_map.get("connection") {
-        if let Some(id_value) = connection.get("id") {
-            if let Ok(id) = owned_value_to_string(id_value) {
-                return Ok(Some(id));
-            }
-        }
-    }
-
-    Ok(None)
 }

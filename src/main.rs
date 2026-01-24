@@ -200,14 +200,19 @@ fn build_ui(app: &Application) {
                     }
                     request_state_refresh(&ui_tx_rx);
                 }
-                UiEvent::ConnectDone { ssid, result, from_password } => {
-                    loading_rx.stop();
-                    update_loading_ui(header_rx.as_ref(), &loading_rx);
-                    match result {
-                        Ok(_) => {
-                            status_rx(StatusKind::Success, format!("Connected to {ssid}"));
-                            request_state_refresh(&ui_tx_rx);
-                        }
+            UiEvent::ConnectDone { ssid, result, from_password } => {
+                loading_rx.stop();
+                update_loading_ui(header_rx.as_ref(), &loading_rx);
+                match result {
+                    Ok(_) => {
+                        status_rx(StatusKind::Success, format!("Connected to {ssid}"));
+                        request_state_refresh(&ui_tx_rx);
+                        let ui_tx = ui_tx_rx.clone();
+                        gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                            request_state_refresh(&ui_tx);
+                            ControlFlow::Break
+                        });
+                    }
                         Err(err) => {
                             if !from_password && needs_password(&err) {
                                 let loading_retry = loading_rx.clone();
@@ -240,26 +245,36 @@ fn build_ui(app: &Application) {
                         }
                     }
                 }
-                UiEvent::DisconnectDone { ssid, result } => {
-                    loading_rx.stop();
-                    update_loading_ui(header_rx.as_ref(), &loading_rx);
-                    match result {
-                        Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
-                        Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
-                    }
-                    request_state_refresh(&ui_tx_rx);
+            UiEvent::DisconnectDone { ssid, result } => {
+                loading_rx.stop();
+                update_loading_ui(header_rx.as_ref(), &loading_rx);
+                match result {
+                    Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
+                    Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
                 }
-                UiEvent::HiddenDone { ssid, result } => {
-                    loading_rx.stop();
-                    update_loading_ui(header_rx.as_ref(), &loading_rx);
-                    match result {
-                        Ok(_) => status_rx(StatusKind::Success, format!("Connected to {ssid}")),
-                        Err(err) => {
-                            status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
-                        }
+                request_state_refresh(&ui_tx_rx);
+                let ui_tx = ui_tx_rx.clone();
+                gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                    request_state_refresh(&ui_tx);
+                    ControlFlow::Break
+                });
+            }
+            UiEvent::HiddenDone { ssid, result } => {
+                loading_rx.stop();
+                update_loading_ui(header_rx.as_ref(), &loading_rx);
+                match result {
+                    Ok(_) => status_rx(StatusKind::Success, format!("Connected to {ssid}")),
+                    Err(err) => {
+                        status_rx(StatusKind::Error, format!("Hidden connect failed: {err:?}"));
                     }
-                    request_state_refresh(&ui_tx_rx);
                 }
+                request_state_refresh(&ui_tx_rx);
+                let ui_tx = ui_tx_rx.clone();
+                gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                    request_state_refresh(&ui_tx);
+                    ControlFlow::Break
+                });
+            }
             }
         }
         ControlFlow::Continue
