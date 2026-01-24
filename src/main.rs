@@ -75,6 +75,7 @@ fn build_ui(app: &Application) {
         &mock_backend,
         &toggle_guard,
         &action_handler,
+        &window,
     );
 
     let list_action = list.clone();
@@ -207,7 +208,8 @@ fn build_network_row(
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
     row.add_css_class("yufi-row");
-    row.set_activatable(false);
+    row.set_activatable(true);
+    row.set_widget_name(&format!("ssid:{}", network.ssid));
 
     let container = GtkBox::new(Orientation::Vertical, 8);
     container.set_margin_top(10);
@@ -288,6 +290,7 @@ fn wire_actions(
     mock_backend: &Rc<MockBackend>,
     toggle_guard: &Rc<Cell<bool>>,
     action_handler: &Rc<RefCell<Option<ActionHandler>>>,
+    parent: &ApplicationWindow,
 ) {
     let list_refresh = list.clone();
     let toggle_refresh = header.toggle.clone();
@@ -334,6 +337,14 @@ fn wire_actions(
         );
         Propagation::Proceed
     });
+
+    let nm_details = nm_backend.clone();
+    let window_details = parent.clone();
+    list.connect_row_activated(move |_list, row| {
+        if let Some(ssid) = ssid_from_row(row) {
+            show_network_details_dialog(&window_details, &ssid, nm_details.clone());
+        }
+    });
 }
 
 fn refresh_ui(
@@ -363,6 +374,129 @@ fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: Ro
     if let Some(handler) = handler {
         handler(action);
     }
+}
+
+fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
+    let name = row.widget_name();
+    let name = name.as_str();
+    name.strip_prefix("ssid:").map(|s| s.to_string())
+}
+
+fn show_network_details_dialog(
+    parent: &ApplicationWindow,
+    ssid: &str,
+    backend: Rc<NetworkManagerBackend>,
+) {
+    let dialog = Dialog::with_buttons(
+        Some("Network Details"),
+        Some(parent),
+        gtk4::DialogFlags::MODAL,
+        &[("Cancel", ResponseType::Cancel), ("Save", ResponseType::Accept)],
+    );
+
+    let content = dialog.content_area();
+    let box_ = GtkBox::new(Orientation::Vertical, 10);
+    box_.set_margin_top(12);
+    box_.set_margin_bottom(12);
+    box_.set_margin_start(12);
+    box_.set_margin_end(12);
+
+    let title = Label::new(Some(ssid));
+    title.set_halign(Align::Start);
+    title.add_css_class("yufi-title");
+
+    let password_label = Label::new(Some("Password"));
+    password_label.set_halign(Align::Start);
+    let password_row = GtkBox::new(Orientation::Horizontal, 8);
+    let password_entry = Entry::new();
+    password_entry.set_visibility(false);
+    password_entry.set_placeholder_text(Some("Hidden"));
+    let reveal_button = Button::with_label("Reveal");
+    reveal_button.add_css_class("yufi-secondary");
+
+    let reveal_state = Rc::new(Cell::new(false));
+    let reveal_state_clone = reveal_state.clone();
+    let backend_clone = backend.clone();
+    let ssid_clone = ssid.to_string();
+    let password_entry_clone = password_entry.clone();
+    reveal_button.connect_clicked(move |button| {
+        if reveal_state_clone.get() {
+            password_entry_clone.set_text("");
+            password_entry_clone.set_visibility(false);
+            button.set_label("Reveal");
+            reveal_state_clone.set(false);
+            return;
+        }
+
+        match backend_clone.get_saved_password(&ssid_clone) {
+            Ok(Some(password)) => {
+                password_entry_clone.set_text(&password);
+                password_entry_clone.set_visibility(true);
+                button.set_label("Hide");
+                reveal_state_clone.set(true);
+            }
+            Ok(None) => {
+                password_entry_clone.set_text("");
+                password_entry_clone.set_visibility(false);
+            }
+            Err(err) => {
+                eprintln!("Failed to load password: {err:?}");
+            }
+        }
+    });
+
+    password_row.append(&password_entry);
+    password_row.append(&reveal_button);
+
+    let ip_label = Label::new(Some("IP Address"));
+    ip_label.set_halign(Align::Start);
+    let ip_entry = Entry::new();
+    ip_entry.set_placeholder_text(Some("e.g. 192.168.1.124"));
+
+    let dns_label = Label::new(Some("DNS Server"));
+    dns_label.set_halign(Align::Start);
+    let dns_entry = Entry::new();
+    dns_entry.set_placeholder_text(Some("e.g. 1.1.1.1"));
+
+    let auto_row = GtkBox::new(Orientation::Horizontal, 8);
+    let auto_label = Label::new(Some("Auto‑reconnect"));
+    auto_label.set_halign(Align::Start);
+    auto_label.set_hexpand(true);
+    let auto_switch = Switch::builder().active(true).build();
+    auto_row.append(&auto_label);
+    auto_row.append(&auto_switch);
+
+    box_.append(&title);
+    box_.append(&password_label);
+    box_.append(&password_row);
+    box_.append(&ip_label);
+    box_.append(&ip_entry);
+    box_.append(&dns_label);
+    box_.append(&dns_entry);
+    box_.append(&auto_row);
+    content.append(&box_);
+
+    let ip_entry = ip_entry.clone();
+    let dns_entry = dns_entry.clone();
+    let auto_switch = auto_switch.clone();
+    let ssid = ssid.to_string();
+    dialog.connect_response(move |dialog, response| {
+        if response == ResponseType::Accept {
+            let ip = ip_entry.text().to_string();
+            let dns = dns_entry.text().to_string();
+            let ip_opt = if ip.is_empty() { None } else { Some(ip.as_str()) };
+            let dns_opt = if dns.is_empty() { None } else { Some(dns.as_str()) };
+
+            if let Err(err) = backend.set_ip_dns(&ssid, ip_opt, dns_opt) {
+                eprintln!("Failed to set IP/DNS: {err:?}");
+            }
+            if let Err(err) = backend.set_autoreconnect(&ssid, auto_switch.is_active()) {
+                eprintln!("Failed to set auto‑reconnect: {err:?}");
+            }
+        }
+        dialog.close();
+    });
+    dialog.show();
 }
 
 fn show_password_dialog<F: Fn(Option<String>) + 'static>(
@@ -532,6 +666,13 @@ fn load_css() {
     .yufi-primary {
         background: #2f7ae5;
         color: #ffffff;
+        border-radius: 10px;
+        padding: 6px 10px;
+    }
+
+    .yufi-secondary {
+        background: #3a3a3a;
+        color: #e6e6e6;
         border-radius: 10px;
         padding: 6px 10px;
     }
