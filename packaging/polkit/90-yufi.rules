@@ -1,0 +1,23 @@
+// Optional polkit rule for YuFi. Review before installing.
+// Install to /etc/polkit-1/rules.d/90-yufi.rules
+// Adjust groups/actions to match your security policy.
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        "org.freedesktop.NetworkManager.network-control",
+        "org.freedesktop.NetworkManager.settings.modify.system",
+        "org.freedesktop.NetworkManager.settings.modify.own",
+        "org.freedesktop.NetworkManager.enable-disable-wifi"
+    ];
+
+    if (!subject.active) {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    if (subject.isInGroup("wheel") || subject.isInGroup("sudo")) {
+        if (allowed.indexOf(action.id) >= 0) {
+            return polkit.Result.YES;
+        }
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

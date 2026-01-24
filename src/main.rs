@@ -14,10 +14,13 @@ use gtk4::{
 };
 use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::thread;
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 fn main() {
     let app = Application::builder()
@@ -57,6 +60,7 @@ fn build_ui(app: &Application) {
     let loading = LoadingTracker::new();
 
     let state = load_state_with_backend(&nm_backend, &mock_backend);
+    let state_cache = Rc::new(RefCell::new(state.clone()));
 
     let header = build_header(&state);
     let header_ref = Rc::new(header.clone());
@@ -64,7 +68,6 @@ fn build_ui(app: &Application) {
     let (status_bar, status_label) = build_status();
     let status_handler = build_status_handler(&status_label);
     let list = build_network_list();
-    let state_cache = Rc::new(RefCell::new(state.clone()));
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
     let optimistic_active = Rc::new(RefCell::new(None::<String>));
     let filtered_state = filter_state(&state, &search.text().to_string());
@@ -185,6 +188,11 @@ fn build_ui(app: &Application) {
     let ui_tx_rx = ui_tx.clone();
     let ui_rx = Rc::new(RefCell::new(ui_rx));
     let optimistic_active_rx = optimistic_active.clone();
+    let refresh_guard = Rc::new(Cell::new(false));
+    let refresh_guard_rx = refresh_guard.clone();
+    let refresh_guard_signal = refresh_guard.clone();
+    let ui_tx_signal = ui_tx.clone();
+    spawn_nm_signal_listeners(&ui_tx_signal);
     let state_cache_rx = state_cache.clone();
     let search_rx = search.clone();
 
@@ -250,23 +258,23 @@ fn build_ui(app: &Application) {
                     }
                     request_state_refresh(&ui_tx_rx);
                 }
-            UiEvent::ConnectDone { ssid, result, from_password } => {
-                loading_rx.stop();
-                update_loading_ui(header_rx.as_ref(), &loading_rx);
-                match result {
-                    Ok(_) => {
-                        *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
-                        status_rx(StatusKind::Success, format!("Connected to {ssid}"));
-                        request_state_refresh(&ui_tx_rx);
-                        let ui_tx = ui_tx_rx.clone();
-                        gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                            request_state_refresh(&ui_tx);
-                            ControlFlow::Break
-                        });
-                    }
-                    Err(err) => {
-                        *optimistic_active_rx.borrow_mut() = None;
-                        if !from_password && needs_password(&err) {
+                UiEvent::ConnectDone { ssid, result, from_password } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => {
+                            *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
+                            status_rx(StatusKind::Success, format!("Connected to {ssid}"));
+                            request_state_refresh(&ui_tx_rx);
+                            let ui_tx = ui_tx_rx.clone();
+                            gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                                request_state_refresh(&ui_tx);
+                                ControlFlow::Break
+                            });
+                        }
+                        Err(err) => {
+                            *optimistic_active_rx.borrow_mut() = None;
+                            if !from_password && needs_password(&err) {
                                 let loading_retry = loading_rx.clone();
                                 let header_retry = header_rx.clone();
                                 let ui_tx_retry = ui_tx_rx.clone();
@@ -297,27 +305,27 @@ fn build_ui(app: &Application) {
                         }
                     }
                 }
-            UiEvent::DisconnectDone { ssid, result } => {
-                loading_rx.stop();
-                update_loading_ui(header_rx.as_ref(), &loading_rx);
-                match result {
-                    Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
+                UiEvent::DisconnectDone { ssid, result } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => status_rx(StatusKind::Success, format!("Disconnected from {ssid}")),
                     Err(err) => status_rx(StatusKind::Error, format!("Disconnect failed: {err:?}")),
                 }
                 *optimistic_active_rx.borrow_mut() = None;
                 request_state_refresh(&ui_tx_rx);
-                let ui_tx = ui_tx_rx.clone();
-                gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                    request_state_refresh(&ui_tx);
-                    ControlFlow::Break
-                });
-            }
-            UiEvent::HiddenDone { ssid, result } => {
-                loading_rx.stop();
-                update_loading_ui(header_rx.as_ref(), &loading_rx);
-                match result {
-                    Ok(_) => {
-                        *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
+                    let ui_tx = ui_tx_rx.clone();
+                    gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                        request_state_refresh(&ui_tx);
+                        ControlFlow::Break
+                    });
+                }
+                UiEvent::HiddenDone { ssid, result } => {
+                    loading_rx.stop();
+                    update_loading_ui(header_rx.as_ref(), &loading_rx);
+                    match result {
+                        Ok(_) => {
+                            *optimistic_active_rx.borrow_mut() = Some(ssid.clone());
                         status_rx(StatusKind::Success, format!("Connected to {ssid}"));
                     }
                     Err(err) => {
@@ -325,12 +333,25 @@ fn build_ui(app: &Application) {
                     }
                 }
                 request_state_refresh(&ui_tx_rx);
-                let ui_tx = ui_tx_rx.clone();
-                gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
-                    request_state_refresh(&ui_tx);
-                    ControlFlow::Break
-                });
-            }
+                    let ui_tx = ui_tx_rx.clone();
+                    gtk4::glib::timeout_add_local(Duration::from_millis(1500), move || {
+                        request_state_refresh(&ui_tx);
+                        ControlFlow::Break
+                    });
+                }
+                UiEvent::RefreshRequested => {
+                    if refresh_guard_rx.get() {
+                        continue;
+                    }
+                    refresh_guard_rx.set(true);
+                    let ui_tx = ui_tx_rx.clone();
+                    let guard = refresh_guard_signal.clone();
+                    gtk4::glib::timeout_add_local(Duration::from_millis(150), move || {
+                        request_state_refresh(&ui_tx);
+                        guard.set(false);
+                        ControlFlow::Break
+                    });
+                }
             }
         }
         ControlFlow::Continue
@@ -388,6 +409,7 @@ fn build_header(state: &AppState) -> HeaderWidgets {
 
     let refresh = Button::builder().icon_name("view-refresh").build();
     refresh.add_css_class("yufi-icon-button");
+    refresh.add_css_class("flat");
 
     let spinner = Spinner::new();
     spinner.set_visible(false);
@@ -438,6 +460,7 @@ fn build_status() -> (GtkBox, Label) {
 
     let status = Label::new(None);
     status.add_css_class("yufi-status");
+    status.add_css_class("dim-label");
     status.set_halign(Align::Start);
     status.set_hexpand(true);
     status.set_visible(false);
@@ -491,6 +514,7 @@ fn build_network_row(
         NetworkAction::Connect => {
             let button = Button::with_label("Connect");
             button.add_css_class("yufi-primary");
+            button.add_css_class("suggested-action");
             button.set_hexpand(true);
             button.set_halign(Align::Fill);
             let ssid = network.ssid.clone();
@@ -501,6 +525,7 @@ fn build_network_row(
         NetworkAction::Disconnect => {
             let button = Button::with_label("Disconnect");
             button.add_css_class("yufi-primary");
+            button.add_css_class("suggested-action");
             button.set_hexpand(true);
             button.set_halign(Align::Fill);
             let ssid = network.ssid.clone();
@@ -520,6 +545,7 @@ fn build_network_row(
 fn build_hidden_button() -> Button {
     let hidden = Button::with_label("Connect to Hidden Network...");
     hidden.add_css_class("yufi-footer");
+    hidden.add_css_class("flat");
     hidden
 }
 
@@ -606,6 +632,7 @@ fn build_empty_row(text: &str) -> ListBoxRow {
 
     let label = Label::new(Some(text));
     label.add_css_class("yufi-empty-label");
+    label.add_css_class("dim-label");
     label.set_halign(Align::Start);
     label.set_margin_top(6);
     label.set_margin_bottom(6);
@@ -710,12 +737,17 @@ enum UiEvent {
         ssid: String,
         result: Result<(), BackendError>,
     },
+    RefreshRequested,
 }
 
 enum RowAction {
     Connect(String),
     Disconnect(String),
 }
+
+const NM_BUS_NAME: &str = "org.freedesktop.NetworkManager";
+const NM_OBJECT_PATH: &str = "/org/freedesktop/NetworkManager";
+const NM_DEVICE_TYPE_WIFI: u32 = 2;
 
 fn invoke_action(action_handler: &Rc<RefCell<Option<ActionHandler>>>, action: RowAction) {
     let handler = action_handler.borrow().clone();
@@ -848,6 +880,120 @@ fn spawn_hidden_task(
         let result = backend.connect_hidden(&ssid, "wpa-psk", password.as_deref());
         UiEvent::HiddenDone { ssid, result }
     });
+}
+
+fn spawn_nm_signal_listeners(ui_tx: &mpsc::Sender<UiEvent>) {
+    spawn_nm_properties_listener(ui_tx.clone());
+    spawn_nm_state_listener(ui_tx.clone());
+    spawn_wifi_device_listener(ui_tx.clone());
+}
+
+fn spawn_nm_properties_listener(ui_tx: mpsc::Sender<UiEvent>) {
+    thread::spawn(move || {
+        let Ok(conn) = Connection::system() else { return };
+        let Ok(props) = Proxy::new(
+            &conn,
+            NM_BUS_NAME,
+            NM_OBJECT_PATH,
+            "org.freedesktop.DBus.Properties",
+        ) else {
+            return;
+        };
+        let Ok(mut stream) = props.receive_signal("PropertiesChanged") else { return };
+        while let Some(signal) = stream.next() {
+            let Ok((iface, changed, _invalidated)) = signal
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            else {
+                continue;
+            };
+            if iface == "org.freedesktop.NetworkManager"
+                && (changed.contains_key("ActiveConnections")
+                    || changed.contains_key("WirelessEnabled")
+                    || changed.contains_key("PrimaryConnection"))
+            {
+                let _ = ui_tx.send(UiEvent::RefreshRequested);
+            }
+        }
+    });
+}
+
+fn spawn_nm_state_listener(ui_tx: mpsc::Sender<UiEvent>) {
+    thread::spawn(move || {
+        let Ok(conn) = Connection::system() else { return };
+        let Ok(proxy) = Proxy::new(
+            &conn,
+            NM_BUS_NAME,
+            NM_OBJECT_PATH,
+            "org.freedesktop.NetworkManager",
+        ) else {
+            return;
+        };
+        let Ok(mut stream) = proxy.receive_signal("StateChanged") else { return };
+        while stream.next().is_some() {
+            let _ = ui_tx.send(UiEvent::RefreshRequested);
+        }
+    });
+}
+
+fn spawn_wifi_device_listener(ui_tx: mpsc::Sender<UiEvent>) {
+    thread::spawn(move || {
+        let Ok(conn) = Connection::system() else { return };
+        let Some(device_path) = find_wifi_device_path(&conn) else { return };
+        let Ok(props) = Proxy::new(
+            &conn,
+            NM_BUS_NAME,
+            device_path.as_str(),
+            "org.freedesktop.DBus.Properties",
+        ) else {
+            return;
+        };
+        let Ok(mut stream) = props.receive_signal("PropertiesChanged") else { return };
+        while let Some(signal) = stream.next() {
+            let Ok((iface, changed, _invalidated)) = signal
+                .body()
+                .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
+            else {
+                continue;
+            };
+            if iface == "org.freedesktop.NetworkManager.Device.Wireless"
+                || iface == "org.freedesktop.NetworkManager.Device"
+            {
+                if changed.contains_key("ActiveAccessPoint")
+                    || changed.contains_key("ActiveConnection")
+                    || changed.contains_key("LastScan")
+                {
+                    let _ = ui_tx.send(UiEvent::RefreshRequested);
+                }
+            }
+        }
+    });
+}
+
+fn find_wifi_device_path(conn: &Connection) -> Option<OwnedObjectPath> {
+    let nm = Proxy::new(
+        conn,
+        NM_BUS_NAME,
+        NM_OBJECT_PATH,
+        "org.freedesktop.NetworkManager",
+    )
+    .ok()?;
+    let devices: Vec<OwnedObjectPath> = nm.call("GetDevices", &()).ok()?;
+    for path in devices {
+        let device = Proxy::new(
+            conn,
+            NM_BUS_NAME,
+            path.as_str(),
+            "org.freedesktop.NetworkManager.Device",
+        )
+        .ok()?;
+        let device_type: u32 = device.get_property("DeviceType").ok()?;
+        if device_type == NM_DEVICE_TYPE_WIFI {
+            drop(device);
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn needs_password(err: &BackendError) -> bool {
@@ -1352,14 +1498,7 @@ fn fallback_state(_error: BackendError) -> AppState {
 
 fn load_css() {
     let css = r#"
-    .yufi-window {
-        background: #2b2b2b;
-        color: #e6e6e6;
-        font-family: "Cantarell", "Noto Sans", sans-serif;
-    }
-
     .yufi-panel {
-        background: #2f2f2f;
         border-radius: 18px;
         padding: 12px;
     }
@@ -1374,8 +1513,6 @@ fn load_css() {
     }
 
     .yufi-search {
-        background: #3a3a3a;
-        color: #e6e6e6;
         border-radius: 10px;
         padding: 6px 10px;
     }
@@ -1385,7 +1522,6 @@ fn load_css() {
     }
 
     .yufi-row {
-        background: #333333;
         border-radius: 12px;
         margin-bottom: 8px;
     }
@@ -1395,22 +1531,17 @@ fn load_css() {
     }
 
     .yufi-primary {
-        background: #2f7ae5;
-        color: #ffffff;
         border-radius: 10px;
         padding: 6px 10px;
     }
 
     .yufi-secondary {
-        background: #3a3a3a;
-        color: #e6e6e6;
         border-radius: 10px;
         padding: 6px 10px;
     }
 
     .yufi-status {
         font-size: 12px;
-        color: #bfbfbf;
     }
 
     .yufi-status-bar {
@@ -1418,21 +1549,19 @@ fn load_css() {
     }
 
     .yufi-status-ok {
-        color: #9fd49f;
+        color: @success_color;
     }
 
     .yufi-status-error {
-        color: #f2a3a3;
+        color: @error_color;
     }
 
     .yufi-dialog-error {
-        color: #f2a3a3;
+        color: @error_color;
         font-size: 12px;
     }
 
     .yufi-footer {
-        background: #3a3a3a;
-        color: #cfcfcf;
         border-radius: 12px;
         padding: 10px;
     }
@@ -1455,7 +1584,6 @@ fn load_css() {
     }
 
     .yufi-empty-label {
-        color: #9a9a9a;
         font-size: 12px;
     }
     "#;

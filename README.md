@@ -24,6 +24,16 @@ cargo build
 cargo run
 ```
 
+## Permissions
+YuFi uses NetworkManager via D‑Bus. Changing network settings or revealing saved passwords
+requires a running polkit agent (for example `polkit-gnome`, `lxqt-policykit`, or `mate-polkit`).
+
+Optional: a sample polkit rule is provided at `packaging/polkit/90-yufi.rules` if you want to
+allow active local users to manage Wi‑Fi without repeated prompts. Review it before installing.
+
+Flatpak builds already request system‑bus access in `packaging/com.yufi.app.yml`, but permissions
+still depend on host polkit policy.
+
 ## Packaging (draft)
 - Desktop entry: `com.yufi.app.desktop`
 - Icon: `com.yufi.app.svg`
