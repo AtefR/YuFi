@@ -183,10 +183,11 @@ fn build_ui(app: &Application) {
                 UiEvent::ScanDone(result) => {
                     loading_rx.stop();
                     update_loading_ui(header_rx.as_ref(), &loading_rx);
-                    spinner_rx.stop();
-                    spinner_rx.set_visible(false);
-                    refresh_button_rx.set_sensitive(true);
-                    match result {
+                spinner_rx.stop();
+                spinner_rx.set_visible(false);
+                refresh_button_rx.set_sensitive(true);
+                refresh_button_rx.set_visible(true);
+                match result {
                         Ok(_) => status_rx(StatusKind::Info, "Scan complete".to_string()),
                         Err(err) => status_rx(StatusKind::Error, format!("Scan failed: {err:?}")),
                     }
@@ -533,6 +534,7 @@ fn wire_actions(
         update_loading_ui(header_refresh.as_ref(), &loading_refresh);
         spinner_refresh.set_visible(true);
         spinner_refresh.start();
+        refresh_button.set_visible(false);
         refresh_button.set_sensitive(false);
         status_refresh(StatusKind::Info, "Scan requested".to_string());
         spawn_scan_task(&ui_tx_refresh);
