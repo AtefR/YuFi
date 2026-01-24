@@ -1440,6 +1440,7 @@ fn show_network_details_dialog(
         }
         status_container_save.clear_dialog_label();
         dialog_save.close();
+        request_state_refresh(&ui_tx);
     });
 
     let dialog_cancel = dialog.clone();
@@ -1561,15 +1562,10 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     on_submit: F,
     status_container: StatusContainer,
 ) {
-    let dialog = Dialog::with_buttons(
-        Some("Hidden Network"),
-        Some(parent),
-        gtk4::DialogFlags::MODAL,
-        &[
-            ("Cancel", ResponseType::Cancel),
-            ("Connect", ResponseType::Accept),
-        ],
-    );
+    let dialog = Dialog::new();
+    dialog.set_title(Some("Hidden Network"));
+    dialog.set_transient_for(Some(parent));
+    dialog.set_modal(true);
     dialog.set_default_width(340);
 
     let content = dialog.content_area();
@@ -1603,29 +1599,51 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     box_.append(&pass_entry);
     content.append(&box_);
 
+    let actions = GtkBox::new(Orientation::Horizontal, 8);
+    actions.set_hexpand(true);
+
+    let cancel_button = Button::with_label("Cancel");
+    cancel_button.set_hexpand(true);
+    cancel_button.set_halign(Align::Fill);
+
+    let connect_button = Button::with_label("Connect");
+    connect_button.add_css_class("yufi-primary");
+    connect_button.add_css_class("suggested-action");
+    connect_button.set_hexpand(true);
+    connect_button.set_halign(Align::Fill);
+
+    actions.append(&cancel_button);
+    actions.append(&connect_button);
+    box_.append(&actions);
+    dialog.set_default_widget(Some(&connect_button));
+
     let ssid_entry = ssid_entry.clone();
     let pass_entry = pass_entry.clone();
     let error_label_clone = error_label.clone();
     ssid_entry.connect_changed(move |_| {
         error_label_clone.set_visible(false);
     });
-    dialog.connect_response(move |dialog, response| {
-        if response == ResponseType::Accept {
-            let ssid = ssid_entry.text().to_string();
-            if ssid.trim().is_empty() {
-                error_label.set_text("SSID is required");
-                error_label.set_visible(true);
-                return;
-            }
-            let password = pass_entry.text().to_string();
-            let pw = if password.is_empty() { None } else { Some(password) };
-            on_submit(ssid, pw);
-            status_container.clear_dialog_label();
-            dialog.close();
-        } else {
-            status_container.clear_dialog_label();
-            dialog.close();
+
+    let dialog_connect = dialog.clone();
+    let status_connect = status_container.clone();
+    connect_button.connect_clicked(move |_| {
+        let ssid = ssid_entry.text().to_string();
+        if ssid.trim().is_empty() {
+            error_label.set_text("SSID is required");
+            error_label.set_visible(true);
+            return;
         }
+        let password = pass_entry.text().to_string();
+        let pw = if password.is_empty() { None } else { Some(password) };
+        on_submit(ssid, pw);
+        status_connect.clear_dialog_label();
+        dialog_connect.close();
+    });
+
+    let dialog_cancel = dialog.clone();
+    cancel_button.connect_clicked(move |_| {
+        status_container.clear_dialog_label();
+        dialog_cancel.close();
     });
     dialog.show();
 }
