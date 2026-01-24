@@ -11,7 +11,7 @@ use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Dialog, Entry, Image,
     Label, ListBox, ListBoxRow, Orientation, ResponseType, SearchEntry, Switch,
 };
-use models::{AppState, Network, NetworkAction};
+use models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -475,6 +475,20 @@ fn show_network_details_dialog(
     box_.append(&dns_entry);
     box_.append(&auto_row);
     content.append(&box_);
+
+    let details = backend
+        .get_network_details(ssid)
+        .unwrap_or_else(|_| NetworkDetails::default());
+
+    if let Some(ip) = details.ip_address {
+        ip_entry.set_text(&ip);
+    }
+    if let Some(dns) = details.dns_server {
+        dns_entry.set_text(&dns);
+    }
+    if let Some(auto) = details.auto_reconnect {
+        auto_switch.set_active(auto);
+    }
 
     let ip_entry = ip_entry.clone();
     let dns_entry = dns_entry.clone();

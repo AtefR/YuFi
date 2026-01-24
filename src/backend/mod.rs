@@ -1,7 +1,7 @@
 pub mod mock;
 pub mod nm;
 
-use crate::models::AppState;
+use crate::models::{AppState, NetworkDetails};
 
 #[derive(Debug)]
 pub enum BackendError {
@@ -24,6 +24,7 @@ pub trait Backend {
         security: &str,
         password: Option<&str>,
     ) -> BackendResult<()>;
+    fn get_network_details(&self, ssid: &str) -> BackendResult<NetworkDetails>;
     fn set_ip_dns(&self, ssid: &str, ip: Option<&str>, dns: Option<&str>)
         -> BackendResult<()>;
     fn get_saved_password(&self, ssid: &str) -> BackendResult<Option<String>>;

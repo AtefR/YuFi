@@ -1,5 +1,5 @@
 use crate::backend::{Backend, BackendResult};
-use crate::models::{AppState, Network, NetworkAction};
+use crate::models::{AppState, Network, NetworkAction, NetworkDetails};
 
 pub struct MockBackend;
 
@@ -80,6 +80,10 @@ impl Backend for MockBackend {
         _password: Option<&str>,
     ) -> BackendResult<()> {
         Ok(())
+    }
+
+    fn get_network_details(&self, _ssid: &str) -> BackendResult<NetworkDetails> {
+        Ok(NetworkDetails::default())
     }
 
     fn set_ip_dns(

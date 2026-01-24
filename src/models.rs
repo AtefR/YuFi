@@ -19,3 +19,10 @@ pub struct AppState {
     pub wifi_enabled: bool,
     pub networks: Vec<Network>,
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct NetworkDetails {
+    pub ip_address: Option<String>,
+    pub dns_server: Option<String>,
+    pub auto_reconnect: Option<bool>,
+}

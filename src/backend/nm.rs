@@ -1,5 +1,5 @@
 use crate::backend::{Backend, BackendError, BackendResult};
-use crate::models::{AppState, Network, NetworkAction};
+use crate::models::{AppState, Network, NetworkAction, NetworkDetails};
 use std::collections::HashMap;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{Array, OwnedObjectPath, OwnedValue, Str};
@@ -218,6 +218,40 @@ impl Backend for NetworkManagerBackend {
         Ok(())
     }
 
+    fn get_network_details(&self, ssid: &str) -> BackendResult<NetworkDetails> {
+        let conn = system_bus()?;
+        let settings = nm_settings_proxy(&conn)?;
+        let connection_path = find_connection_for_ssid(&conn, &settings, ssid)?
+            .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
+
+        let settings_map = connection_settings(&conn, &connection_path)?;
+
+        let mut details = NetworkDetails::default();
+
+        if let Some(connection) = settings_map.get("connection") {
+            if let Some(value) = connection.get("autoconnect") {
+                if let Ok(flag) = owned_value_to_bool(value) {
+                    details.auto_reconnect = Some(flag);
+                }
+            }
+        }
+
+        if let Some(ipv4) = settings_map.get("ipv4") {
+            if let Some(value) = ipv4.get("address-data") {
+                if let Some((addr, prefix)) = first_address_from_value(value) {
+                    details.ip_address = Some(format!("{addr}/{prefix}"));
+                }
+            }
+            if let Some(value) = ipv4.get("dns-data") {
+                if let Some(dns) = first_dns_from_value(value) {
+                    details.dns_server = Some(dns);
+                }
+            }
+        }
+
+        Ok(details)
+    }
+
     fn set_ip_dns(
         &self,
         ssid: &str,
@@ -419,6 +453,44 @@ fn owned_value_to_string(value: &OwnedValue) -> BackendResult<String> {
         .try_clone()
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
     String::try_from(owned).map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn owned_value_to_bool(value: &OwnedValue) -> BackendResult<bool> {
+    let owned = value
+        .try_clone()
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    bool::try_from(owned).map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn owned_value_to_u32(value: &OwnedValue) -> BackendResult<u32> {
+    let owned = value
+        .try_clone()
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    u32::try_from(owned).map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn value_to_vec_dict(
+    value: &OwnedValue,
+) -> Option<Vec<HashMap<String, OwnedValue>>> {
+    let owned = value.try_clone().ok()?;
+    Vec::<HashMap<String, OwnedValue>>::try_from(owned).ok()
+}
+
+fn first_address_from_value(value: &OwnedValue) -> Option<(String, u32)> {
+    let dicts = value_to_vec_dict(value)?;
+    let first = dicts.into_iter().next()?;
+    let address = first.get("address")?;
+    let prefix = first.get("prefix")?;
+    let addr = owned_value_to_string(address).ok()?;
+    let pre = owned_value_to_u32(prefix).ok()?;
+    Some((addr, pre))
+}
+
+fn first_dns_from_value(value: &OwnedValue) -> Option<String> {
+    let dicts = value_to_vec_dict(value)?;
+    let first = dicts.into_iter().next()?;
+    let address = first.get("address")?;
+    owned_value_to_string(address).ok()
 }
 
 fn parse_ip_prefix(input: &str) -> (String, u32) {
