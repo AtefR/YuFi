@@ -220,19 +220,87 @@ impl Backend for NetworkManagerBackend {
 
     fn set_ip_dns(
         &self,
-        _ssid: &str,
-        _ip: Option<&str>,
-        _dns: Option<&str>,
+        ssid: &str,
+        ip: Option<&str>,
+        dns: Option<&str>,
     ) -> BackendResult<()> {
-        Err(BackendError::NotImplemented)
+        if ip.is_none() && dns.is_none() {
+            return Ok(());
+        }
+
+        let conn = system_bus()?;
+        let settings = nm_settings_proxy(&conn)?;
+        let connection_path = find_connection_for_ssid(&conn, &settings, ssid)?
+            .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
+
+        let mut settings_map = connection_settings(&conn, &connection_path)?;
+        let ipv4 = settings_map
+            .entry("ipv4".to_string())
+            .or_insert_with(HashMap::new);
+
+        if let Some(ip) = ip {
+            let (address, prefix) = parse_ip_prefix(ip);
+            ipv4.insert("method".to_string(), ov_str("manual"));
+            let mut addr = HashMap::new();
+            addr.insert("address".to_string(), ov_str(&address));
+            addr.insert("prefix".to_string(), OwnedValue::from(prefix));
+            let address_data = vec![addr];
+            ipv4.insert(
+                "address-data".to_string(),
+                ov_array_dict(address_data)?,
+            );
+        }
+
+        if let Some(dns) = dns {
+            let mut dns_entry = HashMap::new();
+            dns_entry.insert("address".to_string(), ov_str(dns));
+            let dns_data = vec![dns_entry];
+            ipv4.insert("dns-data".to_string(), ov_array_dict(dns_data)?);
+            ipv4.insert("ignore-auto-dns".to_string(), OwnedValue::from(true));
+        }
+
+        update_connection(&conn, &connection_path, settings_map)
     }
 
     fn get_saved_password(&self, _ssid: &str) -> BackendResult<Option<String>> {
-        Err(BackendError::NotImplemented)
+        let conn = system_bus()?;
+        let settings = nm_settings_proxy(&conn)?;
+        let connection_path = find_connection_for_ssid(&conn, &settings, _ssid)?
+            .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
+
+        let connection_proxy = connection_proxy(&conn, &connection_path)?;
+        let secrets: HashMap<String, HashMap<String, OwnedValue>> = connection_proxy
+            .call("GetSecrets", &("802-11-wireless-security",))
+            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+
+        let sec = match secrets.get("802-11-wireless-security") {
+            Some(section) => section,
+            None => return Ok(None),
+        };
+
+        if let Some(value) = sec.get("psk") {
+            return owned_value_to_string(value).map(Some);
+        }
+        if let Some(value) = sec.get("wep-key0") {
+            return owned_value_to_string(value).map(Some);
+        }
+
+        Ok(None)
     }
 
     fn set_autoreconnect(&self, _ssid: &str, _enabled: bool) -> BackendResult<()> {
-        Err(BackendError::NotImplemented)
+        let conn = system_bus()?;
+        let settings = nm_settings_proxy(&conn)?;
+        let connection_path = find_connection_for_ssid(&conn, &settings, _ssid)?
+            .ok_or_else(|| BackendError::Unavailable("Connection not found".to_string()))?;
+
+        let mut settings_map = connection_settings(&conn, &connection_path)?;
+        let connection = settings_map
+            .entry("connection".to_string())
+            .or_insert_with(HashMap::new);
+        connection.insert("autoconnect".to_string(), OwnedValue::from(_enabled));
+
+        update_connection(&conn, &connection_path, settings_map)
     }
 }
 
@@ -288,6 +356,19 @@ fn nm_settings_proxy(conn: &Connection) -> BackendResult<Proxy<'_>> {
     .map_err(|e| BackendError::Unavailable(e.to_string()))
 }
 
+fn connection_proxy<'a>(
+    conn: &'a Connection,
+    path: &'a OwnedObjectPath,
+) -> BackendResult<Proxy<'a>> {
+    Proxy::new(
+        conn,
+        nm_consts::BUS_NAME,
+        path.as_str(),
+        nm_consts::CONNECTION_INTERFACE,
+    )
+    .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
 fn first_wifi_device(conn: &Connection, nm: &Proxy<'_>) -> BackendResult<OwnedObjectPath> {
     let devices: Vec<OwnedObjectPath> = nm
         .call("GetDevices", &())
@@ -327,6 +408,48 @@ fn ov_str(value: &str) -> OwnedValue {
 fn ov_bytes(bytes: Vec<u8>) -> BackendResult<OwnedValue> {
     OwnedValue::try_from(Array::from(bytes))
         .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn ov_array_dict(value: Vec<HashMap<String, OwnedValue>>) -> BackendResult<OwnedValue> {
+    OwnedValue::try_from(Array::from(value)).map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn owned_value_to_string(value: &OwnedValue) -> BackendResult<String> {
+    let owned = value
+        .try_clone()
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    String::try_from(owned).map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn parse_ip_prefix(input: &str) -> (String, u32) {
+    if let Some((addr, prefix)) = input.split_once('/') {
+        if let Ok(prefix) = prefix.parse::<u32>() {
+            return (addr.to_string(), prefix);
+        }
+    }
+    (input.to_string(), 24)
+}
+
+fn connection_settings(
+    conn: &Connection,
+    path: &OwnedObjectPath,
+) -> BackendResult<HashMap<String, HashMap<String, OwnedValue>>> {
+    let proxy = connection_proxy(conn, path)?;
+    proxy
+        .call("GetSettings", &())
+        .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+fn update_connection(
+    conn: &Connection,
+    path: &OwnedObjectPath,
+    settings: HashMap<String, HashMap<String, OwnedValue>>,
+) -> BackendResult<()> {
+    let proxy = connection_proxy(conn, path)?;
+    let _: () = proxy
+        .call("Update", &(settings,))
+        .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+    Ok(())
 }
 
 fn ssid_from_value(value: &OwnedValue) -> Option<String> {
