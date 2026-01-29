@@ -70,6 +70,7 @@ fn build_ui(app: &Application) {
     let list_scroller = ScrolledWindow::new();
     list_scroller.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
     list_scroller.set_vexpand(true);
+    list_scroller.set_hexpand(true);
     list_scroller.set_child(Some(&list));
     let legend = build_lock_legend();
     let action_handler: Rc<RefCell<Option<ActionHandler>>> = Rc::new(RefCell::new(None));
@@ -97,8 +98,6 @@ fn build_ui(app: &Application) {
     let status_container = Rc::new(StatusContainer {
         dialog_label: Rc::new(RefCell::new(None)),
     });
-    let spacer = GtkBox::new(Orientation::Vertical, 0);
-    spacer.set_vexpand(true);
     let hidden = build_hidden_button();
 
     panel.append(&header.container);
@@ -106,7 +105,6 @@ fn build_ui(app: &Application) {
     panel.append(&status_bar);
     panel.append(&list_scroller);
     panel.append(&legend);
-    panel.append(&spacer);
     panel.append(&hidden);
 
     root.append(&panel);
