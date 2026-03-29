@@ -1,3 +1,5 @@
+![YuFi screenshot](assets/readme/yufi-screenshot.png)
+
 # YuFi
 
 YuFi is a lightweight GTK4 Wi‑Fi manager for Linux, built in Rust. It focuses on a clean,
@@ -20,7 +22,7 @@ yay -S yufi-bin
 ### GitHub Releases (manual)
 Download the release tarball and extract it to `/` (it contains a `usr/` tree).
 ```
-tar -xzf yufi-1.0.0-x86_64.tar.gz -C /
+sudo tar -xzf yufi-<version>-x86_64.tar.gz -C /
 ```
 
 ## Features
@@ -28,7 +30,7 @@ tar -xzf yufi-1.0.0-x86_64.tar.gz -C /
 - Scan and list networks with quick connect/disconnect
 - Connect to hidden networks
 - View saved network details
-- Edit IP/DNS configuration (IP, prefix, gateway, DNS)
+- Edit IP/DNS configuration (IP, gateway, DNS)
 - Reveal saved password (if permissions allow)
 - Manage auto‑reconnect per network
 
