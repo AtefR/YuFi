@@ -6,7 +6,7 @@ YuFi is a lightweight GTK4 Wi‑Fi manager for Linux, built in Rust. It focuses 
 minimal dashboard for quick toggles, scanning, and network management.
 
 ## Status
-Stable 1.0.0 release. Ongoing maintenance and UX polish.
+Stable 1.1.0 release. Ongoing maintenance and UX polish.
 
 ## Install
 ### Arch (AUR)
