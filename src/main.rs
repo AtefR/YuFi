@@ -112,7 +112,6 @@ fn build_ui(app: &Application) {
     wire_actions(
         &header,
         &list,
-        &nm_backend,
         &state_cache,
         &failed_connects,
         &toggle_guard,
@@ -435,19 +434,19 @@ fn build_ui(app: &Application) {
                         }
                     }
                 }
-                UiEvent::ActiveState { ssid, state } => {
+                UiEvent::ActiveState { ssid, state, reason } => {
                     let pending = pending_connect_rx.borrow().clone();
                     if let Some(pending) = pending {
                         if pending.ssid != ssid {
                             continue;
                         }
-                        let is_secure = state_cache_rx
-                            .borrow()
-                            .networks
-                            .iter()
-                            .find(|network| network.ssid == ssid)
-                            .map(|network| network.is_secure)
-                            .unwrap_or(false);
+                        // Only treat an activation failure as a password problem
+                        // when NetworkManager actually reports one. Reason 9 =
+                        // NO_SECRETS, 10 = LOGIN_FAILED. Otherwise a saved
+                        // network with a valid password would wrongly prompt on
+                        // any transient failure (timeout, weak signal, …).
+                        let password_problem =
+                            pending.from_password || matches!(reason, 9 | 10);
                         if state == 2 {
                             status_rx(StatusKind::Info, String::new());
                             *pending_connect_rx.borrow_mut() = None;
@@ -455,7 +454,7 @@ fn build_ui(app: &Application) {
                             failed_connects_rx.borrow_mut().remove(&ssid);
                             request_state_refresh(&ui_tx_rx);
                         } else if state == 4 {
-                            let message = if pending.from_password || is_secure {
+                            let message = if password_problem {
                                 "Incorrect password. Try again.".to_string()
                             } else {
                                 "Failed to connect. Check signal and try again.".to_string()
@@ -466,7 +465,7 @@ fn build_ui(app: &Application) {
                             );
                             *pending_connect_rx.borrow_mut() = None;
                             *optimistic_active_rx.borrow_mut() = None;
-                            if pending.from_password || is_secure {
+                            if password_problem {
                                 failed_connects_rx.borrow_mut().insert(ssid.clone());
                             }
                             if !pending.was_saved {
@@ -478,7 +477,7 @@ fn build_ui(app: &Application) {
                                 });
                             }
                             request_state_refresh(&ui_tx_rx);
-                            if pending.from_password || is_secure {
+                            if password_problem {
                                 let loading_retry = loading_rx.clone();
                                 let header_retry = header_rx.clone();
                                 let ui_tx_retry = ui_tx_rx.clone();
@@ -911,7 +910,6 @@ fn build_empty_row(text: &str) -> ListBoxRow {
 fn wire_actions(
     header: &HeaderWidgets,
     list: &ListBox,
-    nm_backend: &Rc<NetworkManagerBackend>,
     state_cache: &Rc<RefCell<AppState>>,
     failed_connects: &Rc<RefCell<HashSet<String>>>,
     toggle_guard: &Rc<Cell<bool>>,
@@ -956,7 +954,6 @@ fn wire_actions(
         Propagation::Proceed
     });
 
-    let nm_details = nm_backend.clone();
     let window_details = parent.clone();
     let status_details = status.clone();
     let status_details_container = status_container.clone();
@@ -983,7 +980,6 @@ fn wire_actions(
                 show_network_details_dialog(
                     &window_details,
                     &ssid,
-                    nm_details.clone(),
                     ui_tx_details.clone(),
                     status_details.clone(),
                     (*status_details_container).clone(),
@@ -1040,6 +1036,7 @@ enum UiEvent {
     ActiveState {
         ssid: String,
         state: u32,
+        reason: u32,
     },
     CleanupResult {
         ssid: String,
@@ -1095,19 +1092,32 @@ impl StatusContainer {
 
 fn build_status_handler(label: &Label) -> StatusHandler {
     let label = label.clone();
+    let generation = Rc::new(Cell::new(0u64));
     Rc::new(move |kind, text| {
-        show_status(&label, kind, &text);
+        let current = generation.get().wrapping_add(1);
+        generation.set(current);
+        show_status(&label, &generation, current, kind, &text);
     })
 }
 
-fn show_status(label: &Label, kind: StatusKind, text: &str) {
-    if text.is_empty() || matches!(kind, StatusKind::Info) {
-        return;
-    }
-    label.set_text(text);
-    label.set_visible(true);
+fn show_status(
+    label: &Label,
+    generation: &Rc<Cell<u64>>,
+    current: u64,
+    kind: StatusKind,
+    text: &str,
+) {
     label.remove_css_class("yufi-status-ok");
     label.remove_css_class("yufi-status-error");
+
+    if text.is_empty() {
+        label.set_text("");
+        label.set_visible(false);
+        return;
+    }
+
+    label.set_text(text);
+    label.set_visible(true);
 
     match kind {
         StatusKind::Success => label.add_css_class("yufi-status-ok"),
@@ -1121,9 +1131,13 @@ fn show_status(label: &Label, kind: StatusKind, text: &str) {
     };
 
     let label = label.clone();
+    let generation = generation.clone();
     gtk4::glib::timeout_add_local(Duration::from_millis(timeout), move || {
-        label.set_text("");
-        label.set_visible(false);
+        // Only clear if no newer message has replaced this one.
+        if generation.get() == current {
+            label.set_text("");
+            label.set_visible(false);
+        }
         ControlFlow::Break
     });
 }
@@ -1136,6 +1150,32 @@ where
     thread::spawn(move || {
         let event = task();
         let _ = tx.send(event);
+    });
+}
+
+/// Run a blocking backend call on a worker thread and deliver its result to a
+/// callback on the GTK main thread once it completes. Keeps synchronous D-Bus
+/// calls (which can block on polkit prompts) off the UI thread.
+fn run_on_worker<T, W, D>(work: W, on_done: D)
+where
+    T: Send + 'static,
+    W: FnOnce() -> T + Send + 'static,
+    D: FnOnce(T) + 'static,
+{
+    let (tx, rx) = mpsc::channel::<T>();
+    thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    let mut on_done = Some(on_done);
+    gtk4::glib::timeout_add_local(Duration::from_millis(40), move || match rx.try_recv() {
+        Ok(value) => {
+            if let Some(callback) = on_done.take() {
+                callback(value);
+            }
+            ControlFlow::Break
+        }
+        Err(mpsc::TryRecvError::Empty) => ControlFlow::Continue,
+        Err(mpsc::TryRecvError::Disconnected) => ControlFlow::Break,
     });
 }
 
@@ -1333,52 +1373,36 @@ fn spawn_active_connection_listener(
             return;
         };
 
+        // Listen for StateChanged first so we don't miss an early transition
+        // while reading the current state below.
+        let state_changed = proxy.receive_signal("StateChanged").ok();
+
         if let Ok(state) = proxy.get_property::<u32>("State") {
             let _ = tx.send(UiEvent::ActiveState {
                 ssid: ssid.clone(),
                 state,
+                reason: 0,
             });
             if state == 2 || state == 4 {
                 return;
             }
         }
 
-        let Ok(props) = Proxy::new(
-            &conn,
-            NM_BUS_NAME,
-            path.as_str(),
-            "org.freedesktop.DBus.Properties",
-        ) else {
-            return;
-        };
-        let Ok(mut stream) = props.receive_signal("PropertiesChanged") else { return };
+        let Some(mut stream) = state_changed else { return };
         while let Some(signal) = stream.next() {
-            let Ok((iface, changed, _invalidated)) =
-                signal
-                    .body()
-                    .deserialize::<(String, HashMap<String, OwnedValue>, Vec<String>)>()
-            else {
+            let Ok((state, reason)) = signal.body().deserialize::<(u32, u32)>() else {
                 continue;
             };
-            if iface != "org.freedesktop.NetworkManager.Connection.Active" {
-                continue;
-            }
-            let Some(value) = changed.get("State") else { continue };
-            let Some(state) = owned_value_to_u32(value) else { continue };
             let _ = tx.send(UiEvent::ActiveState {
                 ssid: ssid.clone(),
                 state,
+                reason,
             });
             if state == 2 || state == 4 {
                 break;
             }
         }
     });
-}
-
-fn owned_value_to_u32(value: &OwnedValue) -> Option<u32> {
-    let owned = value.try_clone().ok()?;
-    u32::try_from(owned).ok()
 }
 
 fn needs_password(err: &BackendError) -> bool {
@@ -1474,8 +1498,8 @@ fn parse_network_inputs(
     let gateway = if gateway_text.is_empty() {
         None
     } else {
-        if !is_ip_or_ipv6(gateway_text) {
-            return Err("Invalid gateway address".to_string());
+        if !is_ipv4(gateway_text) {
+            return Err("Invalid gateway address (IPv4 only)".to_string());
         }
         if ip.is_none() {
             return Err("Gateway requires an IP address".to_string());
@@ -1492,8 +1516,8 @@ fn parse_network_inputs(
             if entry.is_empty() {
                 continue;
             }
-            if !is_ip_or_ipv6(entry) {
-                return Err(format!("Invalid DNS server: {entry}"));
+            if !is_ipv4(entry) {
+                return Err(format!("Invalid DNS server (IPv4 only): {entry}"));
             }
             list.push(entry.to_string());
         }
@@ -1537,19 +1561,14 @@ fn is_ipv4(input: &str) -> bool {
         if part.is_empty() || part.len() > 3 {
             return false;
         }
-        if part.parse::<u8>().is_err() {
+        if part.len() > 1 && part.starts_with('0') {
+            return false;
+        }
+        if !part.bytes().all(|b| b.is_ascii_digit()) || part.parse::<u8>().is_err() {
             return false;
         }
     }
     true
-}
-
-fn is_ip_or_ipv6(input: &str) -> bool {
-    if is_ipv4(input) {
-        return true;
-    }
-    // Allow basic IPv6 literals without strict validation.
-    input.contains(':')
 }
 
 fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
@@ -1561,12 +1580,13 @@ fn ssid_from_row(row: &ListBoxRow) -> Option<String> {
 fn show_network_details_dialog(
     parent: &ApplicationWindow,
     ssid: &str,
-    backend: Rc<NetworkManagerBackend>,
     ui_tx: mpsc::Sender<UiEvent>,
     status: StatusHandler,
     status_container: StatusContainer,
     failed_connects: Rc<RefCell<HashSet<String>>>,
 ) {
+    let ssid = ssid.to_string();
+
     let dialog = Dialog::new();
     dialog.set_title(Some("Network Details"));
     dialog.set_transient_for(Some(parent));
@@ -1584,11 +1604,10 @@ fn show_network_details_dialog(
     let error_label = Label::new(None);
     error_label.add_css_class("yufi-dialog-error");
     error_label.set_halign(Align::Start);
-        error_label.set_text("");
-        error_label.set_visible(true);
+    error_label.set_visible(false);
     status_container.register_dialog_label(&error_label);
 
-    let title = Label::new(Some(ssid));
+    let title = Label::new(Some(&ssid));
     title.set_halign(Align::Start);
     title.add_css_class("yufi-title");
 
@@ -1601,6 +1620,7 @@ fn show_network_details_dialog(
     password_entry.set_visibility(false);
     password_entry.set_placeholder_text(Some("Hidden"));
     password_entry.set_hexpand(true);
+    password_entry.set_editable(false);
     let reveal_button = Button::builder()
         .icon_name("view-reveal-symbolic")
         .build();
@@ -1609,52 +1629,66 @@ fn show_network_details_dialog(
     reveal_button.set_tooltip_text(Some("Show password"));
 
     let reveal_state = Rc::new(Cell::new(false));
-    let reveal_state_clone = reveal_state.clone();
-    let backend_clone = backend.clone();
-    let ssid_clone = ssid.to_string();
-    let password_entry_clone = password_entry.clone();
-    let status_reveal = status.clone();
-    let status_reveal_container = status_container.clone();
-    reveal_button.connect_clicked(move |button| {
-        if reveal_state_clone.get() {
-            password_entry_clone.set_text("");
-            password_entry_clone.set_visibility(false);
-            button.set_icon_name("view-reveal-symbolic");
-            button.set_tooltip_text(Some("Show password"));
-            reveal_state_clone.set(false);
-            return;
-        }
+    {
+        let reveal_state = reveal_state.clone();
+        let ssid = ssid.clone();
+        let password_entry = password_entry.clone();
+        let status_reveal = status.clone();
+        let status_reveal_container = status_container.clone();
+        reveal_button.connect_clicked(move |button| {
+            if reveal_state.get() {
+                password_entry.set_text("");
+                password_entry.set_visibility(false);
+                button.set_icon_name("view-reveal-symbolic");
+                button.set_tooltip_text(Some("Show password"));
+                reveal_state.set(false);
+                return;
+            }
 
-        match backend_clone.get_saved_password(&ssid_clone) {
-            Ok(Some(password)) => {
-                password_entry_clone.set_text(&password);
-                password_entry_clone.set_visibility(true);
-                button.set_icon_name("view-conceal-symbolic");
-                button.set_tooltip_text(Some("Hide password"));
-                reveal_state_clone.set(true);
-            }
-            Ok(None) => {
-                password_entry_clone.set_text("");
-                password_entry_clone.set_visibility(false);
-                status_reveal(StatusKind::Info, "No saved password".to_string());
-            }
-            Err(err) => {
-                let message = password_error_message(&err);
-                status_reveal_container.show_dialog_error(message.clone());
-                status_reveal(StatusKind::Error, message);
-            }
-        }
-    });
+            button.set_sensitive(false);
+            let ssid = ssid.clone();
+            let button = button.clone();
+            let password_entry = password_entry.clone();
+            let reveal_state = reveal_state.clone();
+            let status_reveal = status_reveal.clone();
+            let status_reveal_container = status_reveal_container.clone();
+            run_on_worker(
+                move || NetworkManagerBackend::new().get_saved_password(&ssid),
+                move |result| {
+                    button.set_sensitive(true);
+                    match result {
+                        Ok(Some(password)) => {
+                            password_entry.set_text(&password);
+                            password_entry.set_visibility(true);
+                            button.set_icon_name("view-conceal-symbolic");
+                            button.set_tooltip_text(Some("Hide password"));
+                            reveal_state.set(true);
+                        }
+                        Ok(None) => {
+                            password_entry.set_text("");
+                            password_entry.set_visibility(false);
+                            status_reveal(StatusKind::Info, "No saved password".to_string());
+                        }
+                        Err(err) => {
+                            let message = password_error_message(&err);
+                            status_reveal_container.show_dialog_error(message.clone());
+                            status_reveal(StatusKind::Error, message);
+                        }
+                    }
+                },
+            );
+        });
+    }
 
     password_row.append(&password_entry);
     password_row.append(&reveal_button);
 
     let manual_fields = GtkBox::new(Orientation::Vertical, 8);
 
-    let ip_label = Label::new(Some("IP Address"));
+    let ip_label = Label::new(Some("IP Address (IPv4)"));
     ip_label.set_halign(Align::Start);
     let ip_entry = Entry::new();
-    ip_entry.set_placeholder_text(Some("e.g. 192.168.1.124"));
+    ip_entry.set_placeholder_text(Some("e.g. 192.168.1.124/24"));
 
     let gateway_label = Label::new(Some("Gateway"));
     gateway_label.set_halign(Align::Start);
@@ -1671,6 +1705,7 @@ fn show_network_details_dialog(
     dhcp_label.set_halign(Align::Start);
     dhcp_label.set_hexpand(true);
     let dhcp_switch = Switch::builder().active(true).build();
+    dhcp_switch.set_sensitive(false);
     dhcp_row.append(&dhcp_label);
     dhcp_row.append(&dhcp_switch);
 
@@ -1679,6 +1714,7 @@ fn show_network_details_dialog(
     auto_label.set_halign(Align::Start);
     auto_label.set_hexpand(true);
     let auto_switch = Switch::builder().active(true).build();
+    auto_switch.set_sensitive(false);
     auto_row.append(&auto_label);
     auto_row.append(&auto_switch);
 
@@ -1705,6 +1741,7 @@ fn show_network_details_dialog(
     save_button.add_css_class("suggested-action");
     save_button.set_hexpand(true);
     save_button.set_halign(Align::Fill);
+    save_button.set_sensitive(false);
 
     let cancel_button = Button::with_label("Cancel");
     cancel_button.set_hexpand(true);
@@ -1729,149 +1766,230 @@ fn show_network_details_dialog(
     content.append(&box_);
     dialog.set_default_widget(Some(&save_button));
 
-    let details = backend
-        .get_network_details(ssid)
-        .unwrap_or_else(|_| NetworkDetails::default());
-
-    let mut has_manual = false;
-    if let Some(ip) = details.ip_address {
-        ip_entry.set_text(&ip);
-        has_manual = true;
-    }
-    if let Some(gateway) = details.gateway {
-        gateway_entry.set_text(&gateway);
-        has_manual = true;
-    }
-    if !details.dns_servers.is_empty() {
-        dns_entry.set_text(&details.dns_servers.join(", "));
-        has_manual = true;
-    }
-    dhcp_switch.set_active(!has_manual);
-    manual_fields.set_visible(!dhcp_switch.is_active());
-    if let Some(auto) = details.auto_reconnect {
-        auto_switch.set_active(auto);
-    }
-
-    let backend_forget = backend.clone();
-    let ssid_forget = ssid.to_string();
-    let status_forget = status.clone();
-    let status_container_forget = status_container.clone();
-    let dialog_forget = dialog.clone();
-    let parent_forget = parent.clone();
-    let ui_tx_forget = ui_tx.clone();
-    let failed_forget_ref = failed_connects.clone();
-    forget_button.connect_clicked(move |_| {
-        let confirm = MessageDialog::builder()
-            .transient_for(&parent_forget)
-            .modal(true)
-            .message_type(MessageType::Warning)
-            .text("Forget this network?")
-            .secondary_text("Saved credentials and settings will be removed.")
-            .build();
-        confirm.add_button("Cancel", ResponseType::Cancel);
-        confirm.add_button("Forget", ResponseType::Accept);
-        confirm.set_default_response(ResponseType::Cancel);
-        if let Some(forget_action) = confirm.widget_for_response(ResponseType::Accept) {
-            forget_action.add_css_class("destructive-action");
-        }
-        let backend_confirm = backend_forget.clone();
-        let ssid_confirm = ssid_forget.clone();
-        let status_confirm = status_forget.clone();
-        let status_container_confirm = status_container_forget.clone();
-        let dialog_close = dialog_forget.clone();
-        let ui_tx_confirm = ui_tx_forget.clone();
-        let failed_confirm = failed_forget_ref.clone();
-        confirm.connect_response(move |dialog, response| {
-            if response == ResponseType::Accept {
-                match backend_confirm.forget_network(&ssid_confirm) {
-                    Ok(_) => {
-                        status_confirm(StatusKind::Success, "Network forgotten".to_string());
-                        status_container_confirm.clear_dialog_label();
-                        dialog_close.close();
-                        failed_confirm.borrow_mut().remove(&ssid_confirm);
-                        request_state_refresh(&ui_tx_confirm);
-                    }
-                    Err(err) => {
-                        status_confirm(StatusKind::Error, format!("Failed to forget: {err:?}"));
-                    }
-                }
-            }
-            dialog.close();
+    // Toggling DHCP shows/hides the manual fields.
+    {
+        let manual_fields = manual_fields.clone();
+        let ip_entry = ip_entry.clone();
+        let gateway_entry = gateway_entry.clone();
+        let dns_entry = dns_entry.clone();
+        dhcp_switch.connect_state_set(move |_switch, state| {
+            set_manual_fields_enabled(&ip_entry, &gateway_entry, &dns_entry, !state);
+            manual_fields.set_visible(!state);
+            Propagation::Proceed
         });
-        confirm.present();
-    });
+    }
 
-    let ip_entry = ip_entry.clone();
-    let gateway_entry = gateway_entry.clone();
-    let dns_entry = dns_entry.clone();
-    let manual_fields_toggle = manual_fields.clone();
-    let dhcp_switch_clone = dhcp_switch.clone();
-    let ip_toggle = ip_entry.clone();
-    let gateway_toggle = gateway_entry.clone();
-    let dns_toggle = dns_entry.clone();
-    dhcp_switch.connect_state_set(move |_switch, state| {
-        set_manual_fields_enabled(&ip_toggle, &gateway_toggle, &dns_toggle, !state);
-        manual_fields_toggle.set_visible(!state);
-        Propagation::Proceed
-    });
+    // Forget
+    {
+        let ssid = ssid.clone();
+        let status = status.clone();
+        let status_container = status_container.clone();
+        let dialog = dialog.clone();
+        let parent = parent.clone();
+        let ui_tx = ui_tx.clone();
+        let failed_connects = failed_connects.clone();
+        forget_button.connect_clicked(move |_| {
+            let confirm = MessageDialog::builder()
+                .transient_for(&parent)
+                .modal(true)
+                .message_type(MessageType::Warning)
+                .text("Forget this network?")
+                .secondary_text("Saved credentials and settings will be removed.")
+                .build();
+            confirm.add_button("Cancel", ResponseType::Cancel);
+            confirm.add_button("Forget", ResponseType::Accept);
+            confirm.set_default_response(ResponseType::Cancel);
+            if let Some(forget_action) = confirm.widget_for_response(ResponseType::Accept) {
+                forget_action.add_css_class("destructive-action");
+            }
+            let ssid = ssid.clone();
+            let status = status.clone();
+            let status_container = status_container.clone();
+            let dialog = dialog.clone();
+            let ui_tx = ui_tx.clone();
+            let failed_connects = failed_connects.clone();
+            confirm.connect_response(move |confirm, response| {
+                confirm.close();
+                if response != ResponseType::Accept {
+                    return;
+                }
+                let ssid_done = ssid.clone();
+                let status = status.clone();
+                let status_container = status_container.clone();
+                let dialog = dialog.clone();
+                let ui_tx = ui_tx.clone();
+                let failed_connects = failed_connects.clone();
+                let ssid_work = ssid.clone();
+                run_on_worker(
+                    move || NetworkManagerBackend::new().forget_network(&ssid_work),
+                    move |result| match result {
+                        Ok(_) => {
+                            status(StatusKind::Success, "Network forgotten".to_string());
+                            status_container.clear_dialog_label();
+                            failed_connects.borrow_mut().remove(&ssid_done);
+                            dialog.close();
+                            request_state_refresh(&ui_tx);
+                        }
+                        Err(err) => {
+                            status(StatusKind::Error, format!("Failed to forget: {err:?}"));
+                        }
+                    },
+                );
+            });
+            confirm.present();
+        });
+    }
 
-    let ip_entry = ip_entry.clone();
-    let gateway_entry = gateway_entry.clone();
-    let dns_entry = dns_entry.clone();
-    let auto_switch = auto_switch.clone();
-    let ssid = ssid.to_string();
-    let status_save = status.clone();
-    let status_container = status_container.clone();
-    let status_container_save = status_container.clone();
-    let dialog_save = dialog.clone();
-    let backend_save = backend.clone();
-    save_button.connect_clicked(move |_| {
-        let ip_text = ip_entry.text().to_string();
-        let gateway_text = gateway_entry.text().to_string();
-        let dns_text = dns_entry.text().to_string();
+    // Save
+    {
+        let ssid = ssid.clone();
+        let ip_entry = ip_entry.clone();
+        let gateway_entry = gateway_entry.clone();
+        let dns_entry = dns_entry.clone();
+        let dhcp_switch = dhcp_switch.clone();
+        let auto_switch = auto_switch.clone();
+        let status = status.clone();
+        let status_container = status_container.clone();
+        let dialog = dialog.clone();
+        let ui_tx = ui_tx.clone();
+        save_button.connect_clicked(move |save_button| {
+            let ip_text = ip_entry.text().to_string();
+            let gateway_text = gateway_entry.text().to_string();
+            let dns_text = dns_entry.text().to_string();
 
-        let parsed = match parse_network_inputs(&ip_text, &gateway_text, &dns_text) {
-            Ok(parsed) => parsed,
-            Err(message) => {
-                status_container_save.show_dialog_error(message);
+            let parsed = match parse_network_inputs(&ip_text, &gateway_text, &dns_text) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    status_container.show_dialog_error(message);
+                    return;
+                }
+            };
+
+            let use_manual = !dhcp_switch.is_active();
+            if use_manual && parsed.ip.is_none() {
+                status_container.show_dialog_error(
+                    "An IP address is required for manual configuration".to_string(),
+                );
                 return;
             }
-        };
 
-        let mut failed = false;
-        let use_manual = !dhcp_switch_clone.is_active();
-        let ip = if use_manual { parsed.ip.as_deref() } else { None };
-        let gateway = if use_manual { parsed.gateway.as_deref() } else { None };
-        let dns = if use_manual { parsed.dns } else { None };
-        if let Err(err) = backend_save.set_ip_dns(
-            &ssid,
-            ip,
-            parsed.prefix,
-            gateway,
-            dns,
-        ) {
-            failed = true;
-            status_save(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
-        }
-        if let Err(err) = backend_save.set_autoreconnect(&ssid, auto_switch.is_active()) {
-            failed = true;
-            status_save(StatusKind::Error, format!("Failed to set auto‑reconnect: {err:?}"));
-        }
-        if !failed {
-            status_save(StatusKind::Success, "Saved network settings".to_string());
-        }
-        status_container_save.clear_dialog_label();
-        dialog_save.close();
-        request_state_refresh(&ui_tx);
-    });
+            let ssid = ssid.clone();
+            let auto = auto_switch.is_active();
+            let prefix = parsed.prefix;
+            let ip = if use_manual { parsed.ip } else { None };
+            let gateway = if use_manual { parsed.gateway } else { None };
+            let dns = if use_manual { parsed.dns } else { None };
 
-    let dialog_cancel = dialog.clone();
-    let status_container_cancel = status_container.clone();
-    cancel_button.connect_clicked(move |_| {
-        status_container_cancel.clear_dialog_label();
-        dialog_cancel.close();
-    });
+            save_button.set_sensitive(false);
+            let status = status.clone();
+            let status_container = status_container.clone();
+            let dialog = dialog.clone();
+            let ui_tx = ui_tx.clone();
+            run_on_worker(
+                move || {
+                    let backend = NetworkManagerBackend::new();
+                    let ip_result = backend.set_ip_dns(
+                        &ssid,
+                        use_manual,
+                        ip.as_deref(),
+                        prefix,
+                        gateway.as_deref(),
+                        dns,
+                    );
+                    let auto_result = backend.set_autoreconnect(&ssid, auto);
+                    (ip_result, auto_result)
+                },
+                move |(ip_result, auto_result)| {
+                    let mut failed = false;
+                    if let Err(err) = ip_result {
+                        failed = true;
+                        status(StatusKind::Error, format!("Failed to set IP/DNS: {err:?}"));
+                    }
+                    if let Err(err) = auto_result {
+                        failed = true;
+                        status(
+                            StatusKind::Error,
+                            format!("Failed to set auto‑reconnect: {err:?}"),
+                        );
+                    }
+                    if !failed {
+                        status(StatusKind::Success, "Saved network settings".to_string());
+                    }
+                    status_container.clear_dialog_label();
+                    dialog.close();
+                    request_state_refresh(&ui_tx);
+                },
+            );
+        });
+    }
+
+    {
+        let status_container = status_container.clone();
+        let dialog = dialog.clone();
+        cancel_button.connect_clicked(move |_| {
+            status_container.clear_dialog_label();
+            dialog.close();
+        });
+    }
+
     dialog.present();
+
+    // Load the current settings off the UI thread, then populate and enable.
+    {
+        let ssid = ssid.clone();
+        let ip_entry = ip_entry.clone();
+        let gateway_entry = gateway_entry.clone();
+        let dns_entry = dns_entry.clone();
+        let dhcp_switch = dhcp_switch.clone();
+        let auto_switch = auto_switch.clone();
+        let manual_fields = manual_fields.clone();
+        let save_button = save_button.clone();
+        let status_container = status_container.clone();
+        set_manual_fields_enabled(&ip_entry, &gateway_entry, &dns_entry, false);
+        manual_fields.set_visible(false);
+        run_on_worker(
+            move || NetworkManagerBackend::new().get_network_details(&ssid),
+            move |result| {
+                let details = match result {
+                    Ok(details) => details,
+                    Err(err) => {
+                        status_container
+                            .show_dialog_error(format!("Failed to load settings: {err:?}"));
+                        NetworkDetails::default()
+                    }
+                };
+
+                let mut has_manual = false;
+                if let Some(ip) = details.ip_address {
+                    let text = match details.prefix {
+                        Some(prefix) => format!("{ip}/{prefix}"),
+                        None => ip,
+                    };
+                    ip_entry.set_text(&text);
+                    has_manual = true;
+                }
+                if let Some(gateway) = details.gateway {
+                    gateway_entry.set_text(&gateway);
+                    has_manual = true;
+                }
+                if !details.dns_servers.is_empty() {
+                    dns_entry.set_text(&details.dns_servers.join(", "));
+                    has_manual = true;
+                }
+                if let Some(auto) = details.auto_reconnect {
+                    auto_switch.set_active(auto);
+                }
+
+                dhcp_switch.set_active(!has_manual);
+                manual_fields.set_visible(has_manual);
+                set_manual_fields_enabled(&ip_entry, &gateway_entry, &dns_entry, has_manual);
+
+                dhcp_switch.set_sensitive(true);
+                auto_switch.set_sensitive(true);
+                save_button.set_sensitive(true);
+            },
+        );
+    }
 }
 
 fn prompt_connect_dialog(
@@ -2009,8 +2127,7 @@ fn show_hidden_network_dialog<F: Fn(String, Option<String>) + 'static>(
     let error_label = Label::new(None);
     error_label.add_css_class("yufi-dialog-error");
     error_label.set_halign(Align::Start);
-    error_label.set_text("");
-    error_label.set_visible(true);
+    error_label.set_visible(false);
     status_container.register_dialog_label(&error_label);
 
     let ssid_label = Label::new(Some("Network Name (SSID)"));

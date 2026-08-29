@@ -137,10 +137,25 @@ impl Backend for NetworkManagerBackend {
         let wifi_device = first_wifi_device(&conn, &nm)?;
         let wireless = wireless_proxy(&conn, &wifi_device)?;
 
-        let (ap_path, _ap_strength) = find_ap_for_ssid(&conn, &wireless, _ssid)?;
-
         let settings = nm_settings_proxy(&conn)?;
-        if let Some(connection_path) = find_connection_for_ssid(&conn, &settings, _ssid)? {
+        let existing = find_connection_for_ssid(&conn, &settings, _ssid)?;
+
+        // Prefer the strongest visible AP for this SSID. If none is currently
+        // visible but we already have a saved profile, let NetworkManager pick
+        // the access point itself ("/") instead of failing outright.
+        let ap_path = match find_ap_for_ssid(&conn, &wireless, _ssid) {
+            Ok((path, _strength)) => path,
+            Err(err) => {
+                if existing.is_some() {
+                    OwnedObjectPath::try_from("/")
+                        .map_err(|e| BackendError::Unavailable(e.to_string()))?
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+
+        if let Some(connection_path) = existing {
             let active_path: OwnedObjectPath = nm
                 .call(
                     "ActivateConnection",
@@ -280,15 +295,12 @@ impl Backend for NetworkManagerBackend {
     fn set_ip_dns(
         &self,
         ssid: &str,
+        use_manual: bool,
         ip: Option<&str>,
         prefix: Option<u32>,
         gateway: Option<&str>,
         dns: Option<Vec<String>>,
     ) -> BackendResult<()> {
-        if ip.is_none() && dns.is_none() && gateway.is_none() {
-            return Ok(());
-        }
-
         let conn = system_bus()?;
         let settings = nm_settings_proxy(&conn)?;
         let connection_path = find_connection_for_ssid(&conn, &settings, ssid)?
@@ -299,23 +311,54 @@ impl Backend for NetworkManagerBackend {
             .entry("ipv4".to_string())
             .or_insert_with(HashMap::new);
 
-        let mut set_manual = false;
+        let current_method = ipv4
+            .get("method")
+            .and_then(|v| owned_value_to_string(v).ok())
+            .unwrap_or_default();
+        let manual_keys = [
+            "address-data",
+            "addresses",
+            "gateway",
+            "dns-data",
+            "dns",
+            "ignore-auto-dns",
+        ];
+        let had_manual_config =
+            manual_keys.iter().any(|key| ipv4.contains_key(*key)) || current_method == "manual";
 
-        if let Some(ip) = ip {
-            let (address, default_prefix) = parse_ip_prefix(ip);
-            let prefix = prefix.unwrap_or(default_prefix);
-            ipv4.insert("method".to_string(), ov_str("manual"));
-            let mut addr = HashMap::new();
-            addr.insert("address".to_string(), ov_str(&address));
-            addr.insert("prefix".to_string(), OwnedValue::from(prefix));
-            let address_data = vec![addr];
-            ipv4.insert("address-data".to_string(), ov_array_dict(address_data)?);
-            set_manual = true;
+        if !use_manual {
+            // Nothing to do if the profile is already on DHCP with no leftover
+            // manual entries — avoids a needless polkit prompt on a no-op save.
+            if !had_manual_config && (current_method.is_empty() || current_method == "auto") {
+                return Ok(());
+            }
+            for key in manual_keys {
+                ipv4.remove(key);
+            }
+            ipv4.insert("method".to_string(), ov_str("auto"));
+            return update_connection(&conn, &connection_path, settings_map);
         }
+
+        // Clear any previous manual configuration so edits don't leave stale
+        // entries. The deprecated `addresses`/`dns` keys are dropped too so they
+        // can't shadow the `*-data` variants.
+        for key in manual_keys {
+            ipv4.remove(key);
+        }
+
+        let ip = ip.ok_or_else(|| {
+            BackendError::Unavailable("An IP address is required for manual configuration".to_string())
+        })?;
+
+        let (address, default_prefix) = parse_ip_prefix(ip);
+        let prefix = prefix.unwrap_or(default_prefix);
+        let mut addr = HashMap::new();
+        addr.insert("address".to_string(), ov_str(&address));
+        addr.insert("prefix".to_string(), OwnedValue::from(prefix));
+        ipv4.insert("address-data".to_string(), ov_array_dict(vec![addr])?);
 
         if let Some(gateway) = gateway {
             ipv4.insert("gateway".to_string(), ov_str(gateway));
-            set_manual = true;
         }
 
         if let Some(dns_list) = dns {
@@ -331,13 +374,10 @@ impl Backend for NetworkManagerBackend {
             if !dns_data.is_empty() {
                 ipv4.insert("dns-data".to_string(), ov_array_dict(dns_data)?);
                 ipv4.insert("ignore-auto-dns".to_string(), OwnedValue::from(true));
-                set_manual = true;
             }
         }
 
-        if set_manual {
-            ipv4.insert("method".to_string(), ov_str("manual"));
-        }
+        ipv4.insert("method".to_string(), ov_str("manual"));
 
         update_connection(&conn, &connection_path, settings_map)
     }

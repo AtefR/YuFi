@@ -25,6 +25,7 @@ pub trait Backend {
     fn set_ip_dns(
         &self,
         ssid: &str,
+        use_manual: bool,
         ip: Option<&str>,
         prefix: Option<u32>,
         gateway: Option<&str>,
