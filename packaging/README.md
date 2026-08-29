@@ -6,6 +6,7 @@ Files:
 - `com.yufi.app.yml`: Flatpak manifest
 - `icons/`: PNG icon set (32/64/128/256)
 - `release.sh`: builds the GitHub Releases tarball (usr/ tree)
+- `flatpak/build.sh`: builds a local Flatpak bundle to `dist/yufi.flatpak`
 
 TODO:
 - Add AppImage build script (optional)

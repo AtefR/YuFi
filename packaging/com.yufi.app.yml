@@ -2,6 +2,10 @@ app-id: com.yufi.app
 runtime: org.gnome.Platform
 runtime-version: "46"
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
 command: yufi
 finish-args:
   - --share=network
